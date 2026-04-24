@@ -100,22 +100,58 @@ On first message the agent will:
 
 ## What the agent can do
 
+### Automated session startup
+
+You don't configure anything manually. On your **first message** each session, the agent automatically:
+
+1. **Updates skills** — pulls the latest power-platform-skills from GitHub
+2. **Authenticates you** — checks for an existing `pac auth` profile or walks you through device-code login
+3. **Lets you pick your environment** — lists all environments you have access to and connects to the one you choose
+4. **Inventories everything** — runs `pac solution list` (and flow/canvas list where supported) to show all solutions, loose flows, and apps in the environment
+5. **Syncs locally** — if no local folder exists, pulls and unpacks every solution automatically; if files already exist, detects conflicts and asks you which version to keep (local or platform)
+
+All of this happens before you even ask your first real question.
+
+### Day-to-day commands
+
 Once your session is active, just tell the agent what you need in plain English:
 
 | Command | What happens |
 |---|---|
 | `pull MyApp` | Exports and unpacks the solution into a local folder, commits to git |
 | `push MyApp to TEST` | Packs the local folder, imports to the target environment, commits |
-| `edit the main form in MyApp` | Reads the relevant skill, applies changes to the XML/YAML source |
 | `new solution InventoryTracker` | Scaffolds a new solution with `pac solution init` |
 | `compare DEV and TEST` | Pulls the same solution from both environments and diffs them |
 | `status` | Shows auth state, solution list, and git log |
 
+### Skill-based editing (5 plugins, 30+ skills)
+
+The agent doesn't just move solutions around — it can **read and edit** Power Platform source files directly using Microsoft's official skills library. Tell it what to change in plain English and it reads the relevant skill instructions, applies the edits to the XML/YAML/JSON source, and shows you a diff.
+
+| Plugin | What it edits | Example commands |
+|---|---|---|
+| **model-apps** | Forms, views, sitemap, security roles, business rules | `add a phone field to the Contact main form` |
+| **canvas-apps** | Screens, controls, connections, app.json | `add a gallery to the home screen` |
+| **code-apps** | PCF controls, plugins, web resources, TypeScript, C# | `scaffold a new PCF control for date picking` |
+| **power-pages** | Site templates, content snippets, web roles, page layouts | `update the navigation on the support portal` |
+| **mcp-apps** | MCP-based app components | `add a new connector action` |
+
+### Conflict resolution and sync
+
+When your local files and the platform are out of sync, the agent handles it:
+
+- **Solution exists online but not locally** — pulled automatically, no question needed
+- **Solution exists both places** — the agent asks you per-solution whether to keep local or overwrite from platform
+- After resolving, everything is committed in one clean commit
+
 ### Safety built in
 
 - **Production is protected** — the agent will never import to Production unless you explicitly type `confirm push to prod`
-- **Git history stays clean** — one commit per logical action with conventional commit messages
+- **Git history stays clean** — one commit per logical action with conventional commit messages (`chore:` for pulls, `feat:` for pushes)
 - **Errors are diagnosed** — if a `pac` command fails, the agent explains what went wrong and suggests a fix before retrying
+- **Auth is always verified** — the agent checks `pac auth list` before any export or import
+- **No raw zips committed** — solutions are always unpacked before committing; `.zip` files stay in gitignored folders
+- **Managed vs unmanaged** — unmanaged for dev work, managed for production deployments
 
 ---
 
