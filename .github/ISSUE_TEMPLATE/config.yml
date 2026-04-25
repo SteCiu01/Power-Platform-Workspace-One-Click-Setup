@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/SteCiu01/Power-Platform-Workspace-One-Click-Setup/blob/main/SECURITY.md
+    about: Please report security vulnerabilities privately — see SECURITY.md for instructions.
+  - name: General question or discussion
+    url: https://github.com/SteCiu01/Power-Platform-Workspace-One-Click-Setup/issues
+    about: For questions that aren't bugs or feature requests.
