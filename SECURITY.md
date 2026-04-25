@@ -12,7 +12,7 @@ If you discover a security vulnerability in this project, **please do not open
 a public issue**. Instead, report it privately so it can be addressed before
 being disclosed.
 
-**Email:** [steciurlia@gmail.com](mailto:steciurlia@gmail.com)
+**Email:** [steciurlia@gmail.com](mailto:stefano.ciurlia01@gmail.com)
 
 Please include:
 - A description of the vulnerability
