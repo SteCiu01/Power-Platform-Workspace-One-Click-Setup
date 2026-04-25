@@ -265,16 +265,17 @@ This is a pre-release. Expect rough edges. If something breaks, [open an issue](
 
 ## Contributing
 
-This project is open source and open for improvements. If you have ideas,
-fixes, or want to extend the agent’s capabilities:
+This project is open source and actively looking for feedback, ideas, and
+improvements from the community. All contributions are welcome — from typo
+fixes to new agent workflows to cross-platform support.
 
-1. Fork the repo
-2. Create a feature branch
-3. Make your changes
-4. Open a pull request
+See **[CONTRIBUTING.md](CONTRIBUTING.md)** for the full guide — how to set up,
+branch naming, commit style, and PR expectations.
 
-All contributions are welcome — from typo fixes to new agent workflows.
-See [issues](https://github.com/SteCiu01/Power-Platform-Workspace-One-Click-Setup/issues) for known items or to suggest new features.
+Quick links:
+- [Report a bug](https://github.com/SteCiu01/Power-Platform-Workspace-One-Click-Setup/issues/new?template=bug_report.md)
+- [Request a feature](https://github.com/SteCiu01/Power-Platform-Workspace-One-Click-Setup/issues/new?template=feature_request.md)
+- [Open issues](https://github.com/SteCiu01/Power-Platform-Workspace-One-Click-Setup/issues)
 
 ---
 
@@ -282,8 +283,13 @@ See [issues](https://github.com/SteCiu01/Power-Platform-Workspace-One-Click-Setu
 
 | File | Purpose |
 |---|---|
-| `Setup-PowerPlatformWorkspace.bat` | Double-click entry point — share this with your team |
-| `Setup-PowerPlatformWorkspace.ps1` | The full installer — must be in the same folder as the .bat |
+| `power-platform-workspace-installer/Setup-PowerPlatformWorkspace.bat` | Double-click entry point — share this with your team |
+| `power-platform-workspace-installer/Setup-PowerPlatformWorkspace.ps1` | The full installer — must be in the same folder as the .bat |
+| `CHANGELOG.md` | Version history and release notes |
+| `CONTRIBUTING.md` | Guide for contributors |
+| `CODE_OF_CONDUCT.md` | Community standards |
+| `SECURITY.md` | How to report security vulnerabilities |
+| `LICENSE` | MIT License |
 | `README.md` | This file |
 
 ---
