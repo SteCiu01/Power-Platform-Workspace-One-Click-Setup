@@ -14,7 +14,7 @@ authentication, environment sync, and solution management for you.
 ---
 
 <p align="center">
-  <img src="assets/architecture-overview.svg" alt="Power Platform Workspace — Architecture Overview" width="100%"/>
+  <img src="assets/architecture-overview.svg" alt="Power Platform Workspace — Architecture Overview" width="102%"/>
 </p>
 
 ---
