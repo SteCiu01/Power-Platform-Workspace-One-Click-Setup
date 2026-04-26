@@ -55,10 +55,12 @@ folders, config files, CLI tools, and agent definitions, you run a single
 script and everything is ready.
 
 Once set up, a custom Copilot agent called **Power Platform Master Agent** lives
-inside your workspace and acts as your AI-powered co-pilot for the entire Power
-Platform ALM lifecycle: pulling solutions, pushing changes, editing components,
-comparing environments, and more — all through natural language in the Copilot
-Chat panel.
+inside your workspace and acts as your AI-powered co-pilot for the full Power
+Platform development lifecycle. It handles authentication,
+environment sync, and solution management, but it also **builds and edits Power
+Platform components directly**: canvas apps, model-driven app pages, cloud flows,
+Copilot Studio topics, and Dataverse schema — all through natural language in the
+Copilot Chat panel, guided by Microsoft's official [power-platform-skills](https://github.com/microsoft/power-platform-skills).
 
 ---
 
@@ -66,7 +68,7 @@ Chat panel.
 
 | Component | Description |
 |---|---|
-| **Power Platform Master Agent** | A custom Copilot Chat agent that orchestrates your entire workflow — auth, environment selection, solution sync, editing, and deployment |
+| **Power Platform Master Agent** | A custom Copilot Chat agent that covers the full development lifecycle — auth, environment sync, solution management, **and agentic development**: build and edit canvas apps, flows, Copilot Studio topics, model-driven pages, and Dataverse schema through natural language |
 | **Microsoft Power Platform Skills** | Git-cloned from [microsoft/power-platform-skills](https://github.com/microsoft/power-platform-skills) — no npm install or admin rights required (see [FAQ](#faq)) |
 | **PAC CLI Helper Script** | `scripts/pac-workflows.ps1` — pull, push, and init solutions with a single command |
 | **Git Version Control** | Repository initialised with a clean `.gitignore` and first commit out of the box |
@@ -157,6 +159,8 @@ All of this happens before you even ask your first real question.
 
 Once your session is active, just tell the agent what you need in plain English:
 
+**Solution & environment management**
+
 | Command | What happens |
 |---|---|
 | `pull MyApp` | Exports and unpacks the solution into a local folder, commits to git |
@@ -165,9 +169,32 @@ Once your session is active, just tell the agent what you need in plain English:
 | `compare DEV and TEST` | Pulls the same solution from both environments and diffs them |
 | `status` | Shows auth state, solution list, and git log |
 
-### Skill-based editing
+**Agentic development — build and edit components**
 
-The agent doesn't just move solutions around — it can **read and edit** Power Platform source files directly using Microsoft's official [power-platform-skills](https://github.com/microsoft/power-platform-skills) library. Before each task, the agent reads the relevant `SKILL.md` file and follows its instructions step by step to apply the correct edits to your XML/YAML/JSON source, then shows you a diff.
+| Example request | What happens |
+|---|---|
+| `add a text input and a submit button to the Contact screen in MyApp` | Edits the canvas app's PA YAML source directly, following the canvas-apps skill instructions, then shows you a diff |
+| `create a new generative page for the Account table in my model-driven app` | Scaffolds a React + TypeScript + Fluent page using the model-apps skill and deploys it via PAC CLI |
+| `add a condition to my approval flow that sends an email when status is Rejected` | Edits the cloud flow's JSON source inside the unpacked solution and explains every change |
+| `add a new topic to my Copilot Studio agent that handles order status questions` | Edits the topic YAML file in the unpacked solution, following the dialog structure Power Platform expects |
+| `add a new column 'Priority' (choice field) to the Task table in Dataverse` | Updates the entity and attribute XML in the solution's `Other/` folder and flags what needs a manual publish |
+
+> **Honest scope note:** Canvas apps and model-driven pages are guided by official Microsoft-authored skill instructions from the cloned repo. For Power Automate flows, Copilot Studio topics, and Dataverse schema — no dedicated skill exists yet in that repo — so the agent works from its own knowledge of the file formats, editing the unpacked source directly. This works well in practice but is less prescriptive. Always review diffs before pushing.
+
+### Skill-based development
+
+The agent doesn't just move solutions around — it can **build and edit Power Platform components** using Microsoft's official [power-platform-skills](https://github.com/microsoft/power-platform-skills) library. Before each development task, the agent reads the relevant `SKILL.md` file and follows its instructions step by step to apply the correct edits to your source files, then shows you a diff before touching anything.
+
+The skills cover four areas today:
+
+| Skill | What you can ask for |
+|---|---|
+| **canvas-apps** | Add/modify screens, controls, and properties in canvas apps via PA YAML. Requires Canvas Authoring MCP server + .NET 10 SDK |
+| **model-apps** | Generate and deploy custom pages for model-driven apps (React + TypeScript + Fluent) |
+| **code-apps** | Build and deploy standalone code apps connected to Power Platform via connectors (React + Vite + TypeScript) |
+| **power-pages** | Create and modify Power Pages code sites (React, Angular, Vue, or Astro) |
+
+For components not yet covered by a dedicated skill — **Power Automate flows** (JSON), **Copilot Studio topics** (YAML), and **Dataverse schema** (solution XML) — the agent reads and edits the unpacked source files directly and walks you through each change.
 
 > **Why git clone instead of npm install?** Corporate environments typically
 > block npm global installs and require admin approval. This workspace clones
