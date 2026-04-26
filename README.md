@@ -79,12 +79,12 @@ Enter a name for your workspace folder (default: Power Platform): _
 
 Type a name or press **Enter** to accept the default. The script will:
 
-1. ✅ Check all prerequisites (git, node, VS Code, pac)
-2. 📁 Create the folder at `C:\Users\<you>\<folder name>\`
-3. 📄 Generate all config files (`.gitignore`, agent definition, Copilot settings, helper scripts)
-4. 📦 Clone Microsoft's Power Platform Skills repository (30+ skills)
-5. 🔀 Initialise a git repo with the first commit
-6. 🚀 Open the workspace in VS Code
+1. Check all prerequisites (git, node, VS Code, pac)
+2. Create the folder at `C:\Users\<you>\<folder name>\`
+3. Generate all config files (`.gitignore`, agent definition, Copilot settings, helper scripts)
+4. Clone Microsoft's Power Platform Skills repository (30+ skills)
+5. Initialise a git repo with the first commit
+6. Open the workspace in VS Code
 
 ### 3. Start working
 
