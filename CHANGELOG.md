@@ -17,7 +17,7 @@ _Nothing yet — next changes will appear here._
 - Power Platform Master Agent definition (`.github/agents/power-platform-master-agent.agent.md`)
 - Automated session startup flow: skill update → auth → environment selection → inventory → local sync
 - PAC CLI helper script (`scripts/pac-workflows.ps1`) for pull, push, and init operations
-- Git-cloned Microsoft [power-platform-skills](https://github.com/microsoft/power-platform-skills) integration (5 plugins, 38 skills — no npm install required)
+- Git-cloned Microsoft [power-platform-skills](https://github.com/microsoft/power-platform-skills) integration — no npm install required
 - Organised workspace folder structure (`exports/`, `deploy/`, `scripts/`, `.github/agents/`)
 - Git repository initialisation with clean `.gitignore` and first commit
 - Copilot Chat settings for skill plugin discovery
