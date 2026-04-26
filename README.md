@@ -1,6 +1,6 @@
 # Power Platform Workspace — One-Click Setup 
 
-[![Latest Release](https://img.shields.io/badge/version-v0.1.0--preview-blue)](https://github.com/SteCiu01/Power-Platform-Workspace-One-Click-Setup/releases)
+[![Latest Release](https://img.shields.io/github/v/release/SteCiu01/Power-Platform-Workspace-One-Click-Setup?include_prereleases&label=version)](https://github.com/SteCiu01/Power-Platform-Workspace-One-Click-Setup/releases)
 
 Pre-release — functional and tested, evolving fast.
 Contributions and feedback welcome.
@@ -14,7 +14,7 @@ authentication, environment sync, and solution management for you.
 ---
 
 <p align="center">
-  <img src="assets/architecture-overview.svg" alt="Power Platform Workspace — Architecture Overview" width="102%"/>
+  <img src="assets/architecture-overview.svg" alt="Power Platform Workspace — Architecture Overview" width="100%"/>
 </p>
 
 ---
@@ -117,9 +117,9 @@ Enter a name for your workspace folder (default: Power Platform): _
 
 Type a name or press **Enter** to accept the default. The script will:
 
-1. Check all prerequisites (git, node, VS Code, pac)
+1. Check all prerequisites (git, VS Code, pac)
 2. Create the folder at `C:\Users\<you>\<folder name>\`
-3. Generate all config files (`.gitignore`, agent definition, Copilot settings, helper scripts)
+3. Generate all config files (`.gitignore`, agent definition, Copilot instructions, helper scripts)
 4. Clone Microsoft's Power Platform Skills repository
 5. Initialise a git repo with the first commit
 6. Open the workspace in VS Code
@@ -230,8 +230,7 @@ Power Platform/
 ├── .github/
 │   ├── agents/
 │   │   └── power-platform-master-agent.agent.md   ← the agent brain
-│   └── copilot/
-│       └── settings.json                          ← skill plugin config
+│   └── copilot-instructions.md                    ← workspace-level Copilot context
 ├── .gitignore
 ├── AGENTS.md                                      ← quick-reference guide
 ├── deploy/                                        ← packed .zip files for import
