@@ -298,7 +298,7 @@ The `.gitignore` keeps exports, skills, and environment files clean.
 
 **Q: How do I update the skills?**
 A: The agent does this automatically at the start of every session. You can also
-run `cd power-platform-skills && git pull` manually.
+run `git -C power-platform-skills pull` manually.
 
 ---
 
