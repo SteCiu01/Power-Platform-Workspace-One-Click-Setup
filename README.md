@@ -1,4 +1,4 @@
-# Power Platform Workspace — One-Click Setup
+# Power Platform Workspace — One-Click Setup 
 
 [![Latest Release](https://img.shields.io/badge/version-v0.1.0--preview-blue)](https://github.com/SteCiu01/Power-Platform-Workspace-One-Click-Setup/releases)
 
@@ -9,6 +9,40 @@
 > Double-click one file, answer one question, and you have a complete
 > Power Platform development environment with an AI agent that handles
 > authentication, environment sync, and solution management for you.
+
+---
+
+## Why this exists
+
+This is a personal project — and like most personal projects, it started from a real frustration.
+
+I was doing a significant amount of bulk work across Power Platform: building flows in **Power Automate**, designing apps in **Power Apps**, and assembling agents in **Copilot Studio**, all tied together through **solutions and Dataverse**.
+
+What I was looking for was something like the experience I already had on the data side of the Microsoft stack: the **[Microsoft Fabric](https://marketplace.visualstudio.com/items?itemName=fabric.vscode-fabric)** and **[Fabric Data Engineering VS Code](https://marketplace.visualstudio.com/items?itemName=SynapseVSCode.synapse)** extensions give a rich, terminal-driven, agentic workflow right inside VS Code. I wanted the same thing for Power Platform development.
+
+What I found was **[Power Platform Tools for VS Code](https://marketplace.visualstudio.com/items?itemName=microsoft-IsvExpTools.powerplatform-vscode)**. It provides the PAC CLI, auth panels, and environment browsing — but the experience didn't feel as immediate and user-friendly, at least for me, as the Fabric extensions are. On top of that, I noticed that the general GitHub Copilot agent was not referencing the Power Platform skills out of the box.
+
+So I put together a custom Copilot agent that I trigger at the start of every Power Platform session. It loads its skills, authenticates against my tenant, syncs my environments with the local folder, and gets me ready to work in seconds. It became an indispensable part of my daily flow almost immediately. It also complements the Power Platform Tools extension nicely — having both active gives you visual panels for auth and environments alongside the agent's natural-language workflow.
+
+Then, this weekend, I thought: *this should be replicable*. Not just for me — for anyone who works with Power Platform and wants to enhance the developer workflow. So I packaged everything up into a one-click installer and a shareable agent configuration.
+
+---
+
+> **⚠️ Disclaimer — Please read before using**
+>
+> This is a **personal and community project**, built in my spare time for fun and to share something useful. It is not an official Microsoft product, is not affiliated with Microsoft in any way, and comes with no guarantees of any kind.
+>
+> **AI involvement:** This project was built with significant help from **GitHub Copilot** in VS Code. Copilot assisted in writing the installer scripts, agent configuration files, documentation, and a large portion of the "heavy lifting" — from structuring the codebase and handling edge cases, to generating boilerplate and refining prompts. The core ideas, design decisions, and testing are mine; the speed at which it came together is Copilot's.
+>
+> **Early stage — use with care:** This is very much a v0.1. It has been tested and works, but it is at the beginning of its life. Given the level of AI involvement in its creation, there may be bugs, edge cases, or behaviours that do not work as expected in your specific environment. **Do not use this in production environments without fully understanding what the scripts do.** Always review the code before running it.
+>
+> That said — it is a genuinely interesting starting point, and I hope it saves you time and sparks ideas. Feedback, bug reports, and contributions are very welcome.
+
+---
+
+<p align="center">
+  <img src="assets/architecture-overview.svg" alt="Power Platform Workspace — Architecture Overview" width="100%"/>
+</p>
 
 ---
 
@@ -32,7 +66,7 @@ Chat panel.
 | Component | Description |
 |---|---|
 | **Power Platform Master Agent** | A custom Copilot Chat agent that orchestrates your entire workflow — auth, environment selection, solution sync, editing, and deployment |
-| **Microsoft Power Platform Skills** | Git-cloned from [microsoft/power-platform-skills](https://github.com/microsoft/power-platform-skills) — 5 plugins, 38 skills. No npm install or admin rights required (see [FAQ](#faq)) |
+| **Microsoft Power Platform Skills** | Git-cloned from [microsoft/power-platform-skills](https://github.com/microsoft/power-platform-skills) — no npm install or admin rights required (see [FAQ](#faq)) |
 | **PAC CLI Helper Script** | `scripts/pac-workflows.ps1` — pull, push, and init solutions with a single command |
 | **Git Version Control** | Repository initialised with a clean `.gitignore` and first commit out of the box |
 | **Organised Folder Structure** | `exports/`, `deploy/`, `scripts/`, `.github/agents/` — everything where it should be |
@@ -49,6 +83,7 @@ Before running the installer, make sure you have:
 | **GitHub Copilot + Agent Mode** | Yes | Install from VS Code Extensions marketplace. Agent mode must be enabled (`chat.agent.enabled`). Note: org tenants may need admin to enable this. |
 | **Git** | Yes | [git-scm.com](https://git-scm.com) |
 | **PAC CLI** | Recommended | Auto-installed if .NET SDK is present, or the agent will guide you on first run |
+| **[Power Platform Tools](https://marketplace.visualstudio.com/items?itemName=microsoft-IsvExpTools.powerplatform-vscode)** | Nice to have | Adds visual auth/environment panels, YAML language support, and auto-provides the PAC CLI. Not required — the agent works independently |
 
 ---
 
@@ -82,7 +117,7 @@ Type a name or press **Enter** to accept the default. The script will:
 1. Check all prerequisites (git, node, VS Code, pac)
 2. Create the folder at `C:\Users\<you>\<folder name>\`
 3. Generate all config files (`.gitignore`, agent definition, Copilot settings, helper scripts)
-4. Clone Microsoft's Power Platform Skills repository (30+ skills)
+4. Clone Microsoft's Power Platform Skills repository
 5. Initialise a git repo with the first commit
 6. Open the workspace in VS Code
 
@@ -129,7 +164,7 @@ Once your session is active, just tell the agent what you need in plain English:
 | `compare DEV and TEST` | Pulls the same solution from both environments and diffs them |
 | `status` | Shows auth state, solution list, and git log |
 
-### Skill-based editing (5 plugins, 38 skills)
+### Skill-based editing
 
 The agent doesn't just move solutions around — it can **read and edit** Power Platform source files directly using Microsoft's official [power-platform-skills](https://github.com/microsoft/power-platform-skills) library. Before each task, the agent reads the relevant `SKILL.md` file and follows its instructions step by step to apply the correct edits to your XML/YAML/JSON source, then shows you a diff.
 
@@ -137,14 +172,6 @@ The agent doesn't just move solutions around — it can **read and edit** Power 
 > block npm global installs and require admin approval. This workspace clones
 > the skills repo via git — which you already have — so there's zero extra
 > tooling or permissions needed. See [FAQ](#faq) for details.
-
-| Plugin | Skills | Covers | Example commands |
-|---|---|---|---|
-| **model-apps** | 2 | Forms, views, sitemap, genux pages | `add a phone field to the Contact main form` |
-| **canvas-apps** | 5 | Screens, controls, connections, data sources | `add a gallery to the home screen` |
-| **code-apps** | 14 | React+Vite code apps, connectors (Dataverse, SharePoint, Teams, etc.) | `scaffold a new code app with Dataverse` |
-| **power-pages** | 15 | Sites, auth, web roles, SEO, data model, deployment | `create a new Power Pages site` |
-| **mcp-apps** | 2 | MCP widget generation | `generate a UI widget for my MCP tool` |
 
 ### Conflict resolution and sync
 
@@ -256,8 +283,6 @@ run `cd power-platform-skills && git pull` manually.
 | Agent session flow (auth → env → inventory → sync) | **Working** — tested daily |
 | Pull / push / compare / status commands | **Working** |
 | Skill-based editing via local SKILL.md files | **Working** — agent reads and follows instructions from the cloned repo |
-| Cross-platform setup script | **Not yet** — Windows only for now |
-| Automated tests | **Not yet** — planned |
 
 This is a pre-release. Expect rough edges. If something breaks, [open an issue](https://github.com/SteCiu01/Power-Platform-Workspace-One-Click-Setup/issues).
 
