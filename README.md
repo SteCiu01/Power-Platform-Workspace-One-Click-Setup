@@ -2,13 +2,20 @@
 
 [![Latest Release](https://img.shields.io/badge/version-v0.1.0--preview-blue)](https://github.com/SteCiu01/Power-Platform-Workspace-One-Click-Setup/releases)
 
-> Pre-release — functional and tested, evolving fast.
-> Contributions and feedback welcome.
+Pre-release — functional and tested, evolving fast.
+Contributions and feedback welcome.
 
-> **Zero to fully configured in under 60 seconds.**
-> Double-click one file, answer one question, and you have a complete
-> Power Platform development environment with an AI agent that handles
-> authentication, environment sync, and solution management for you.
+**Zero to fully configured in under 60 seconds.**
+
+Double-click one file, answer one question, and you have a complete
+Power Platform development environment with an AI agent that handles
+authentication, environment sync, and solution management for you.
+
+---
+
+<p align="center">
+  <img src="assets/architecture-overview.svg" alt="Power Platform Workspace — Architecture Overview" width="100%"/>
+</p>
 
 ---
 
@@ -24,7 +31,7 @@ What I found was **[Power Platform Tools for VS Code](https://marketplace.visual
 
 So I put together a custom Copilot agent that I trigger at the start of every Power Platform session. It loads its skills, authenticates against my tenant, syncs my environments with the local folder, and gets me ready to work in seconds. It became an indispensable part of my daily flow almost immediately. It also complements the Power Platform Tools extension nicely — having both active gives you visual panels for auth and environments alongside the agent's natural-language workflow.
 
-Then, this weekend, I thought: *this should be replicable*. Not just for me — for anyone who works with Power Platform and wants to enhance the developer workflow. So I packaged everything up into a one-click installer and a shareable agent configuration.
+Then I thought: *this should be replicable*. Not just for me — for anyone who works with Power Platform and wants to enhance the developer workflow. So I packaged everything up into a one-click installer and a shareable agent configuration.
 
 ---
 
@@ -37,12 +44,6 @@ Then, this weekend, I thought: *this should be replicable*. Not just for me — 
 > **Early stage — use with care:** This is very much a v0.1. It has been tested and works, but it is at the beginning of its life. Given the level of AI involvement in its creation, there may be bugs, edge cases, or behaviours that do not work as expected in your specific environment. **Do not use this in production environments without fully understanding what the scripts do.** Always review the code before running it.
 >
 > That said — it is a genuinely interesting starting point, and I hope it saves you time and sparks ideas. Feedback, bug reports, and contributions are very welcome.
-
----
-
-<p align="center">
-  <img src="assets/architecture-overview.svg" alt="Power Platform Workspace — Architecture Overview" width="100%"/>
-</p>
 
 ---
 
