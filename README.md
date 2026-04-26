@@ -56,7 +56,7 @@ Before running the installer, make sure you have:
 
 ### 1. Get the files
 
-You need **two files** — keep them in the same folder:
+You need **two files** — keep them in the same folder (ideall as it is here in the [power-platform-workspace-installer](https://github.com/SteCiu01/Power-Platform-Workspace-One-Click-Setup/tree/main/power-platform-workspace-installer) folder:
 
 ```
 Setup-PowerPlatformWorkspace.bat    ← double-click this
