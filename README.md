@@ -82,7 +82,7 @@ Before running the installer, make sure you have:
 
 | Tool | Required? | How to get it |
 |---|---|---|
-| **VS Code 1.99+** | Yes | [code.visualstudio.com](https://code.visualstudio.com) |
+| **VS Code 1.117.0+** | Yes | [code.visualstudio.com](https://code.visualstudio.com) — older versions have known bugs that break Copilot agent tools |
 | **GitHub Copilot + Agent Mode** | Yes | Install from VS Code Extensions marketplace. Agent mode must be enabled (`chat.agent.enabled`). Note: org tenants may need admin to enable this. |
 | **Git** | Yes | [git-scm.com](https://git-scm.com) |
 | **PAC CLI** | Recommended | Auto-installed if .NET SDK is present, or the agent will guide you on first run |
