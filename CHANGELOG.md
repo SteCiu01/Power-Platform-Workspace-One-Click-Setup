@@ -20,11 +20,11 @@ _Nothing yet — next changes will appear here._
 - Git-cloned Microsoft [power-platform-skills](https://github.com/microsoft/power-platform-skills) integration — no npm install required
 - Organised workspace folder structure (`exports/`, `deploy/`, `scripts/`, `.github/agents/`)
 - Git repository initialisation with clean `.gitignore` and first commit
-- Copilot Chat settings for skill plugin discovery
+- Workspace-level Copilot instructions (`.github/copilot-instructions.md`)
 - `AGENTS.md` quick-reference guide
 - Production protection — agent refuses to push to Production without explicit confirmation
 - Idempotent installer — safe to re-run on existing folders
-- Prerequisite checks for git, node, VS Code, and pac CLI
+- Prerequisite checks for git, VS Code, and pac CLI
 
 ### Known limitations
 
