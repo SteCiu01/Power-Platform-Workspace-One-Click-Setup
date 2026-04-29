@@ -139,6 +139,17 @@ On first message the agent will:
 - Inventory all solutions
 - Sync everything locally
 
+### 4. Keeping it up to date
+
+When a new version is released, updating is the same one step as installing:
+
+1. [Download the latest installer files](https://github.com/SteCiu01/Power-Platform-Workspace-One-Click-Setup/tree/main/power-platform-workspace-installer)
+2. **Double-click `Setup-PowerPlatformWorkspace.bat`** and enter the **same folder name** you used originally
+3. The installer detects the existing folder and switches to **update mode** — it refreshes the agent definition, Copilot instructions, helper scripts, VS Code configs, and pulls the latest power-platform-skills, then stops
+4. Your solutions, environment folders, exports, and any personal files are **not touched**
+
+That's it. Reopen the workspace in VS Code and you're on the latest version.
+
 ---
 
 ## What the agent can do
@@ -263,8 +274,10 @@ The `.bat` wrapper exists solely to bypass Windows PowerShell execution policy
 restrictions. It calls the `.ps1` with `-ExecutionPolicy Bypass` so the script
 runs regardless of your organisation's policy settings.
 
-The script is **idempotent** — if you run it against an existing folder, it
-skips files that already exist and only fills in what's missing.
+The script supports **update mode** — if you run it against an existing folder, it
+overrides all installation-managed files (agent definition, configs, skills) with
+the latest versions while leaving your solutions, environment folders, and personal
+files completely untouched.
 
 ---
 
@@ -302,7 +315,7 @@ run `git -C power-platform-skills pull` manually.
 
 ---
 
-## Current status (v0.1.0-preview)
+## Current status (v0.1.1-preview)
 
 | Area | Status |
 |---|---|
