@@ -4,7 +4,7 @@
 
 | Version | Supported |
 |---|---|
-| 0.1.x-preview | :white_check_mark: |
+| v0.1.1-pre-release | :white_check_mark: |
 
 ## Reporting a Vulnerability
 
