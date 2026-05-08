@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _Nothing yet — next changes will appear here._
 
-## [0.1.1-preview] - 2026-04-29
+## [v0.1.1-pre-release] - 2026-04-29
 
 ### Added
 
@@ -22,7 +22,7 @@ _Nothing yet — next changes will appear here._
 - Installer prompts now clearly explain update-mode behaviour before proceeding
 - Phase 0 / Phase 6 of the agent starting flow rewritten to support greeting vs. question routing
 
-## [0.1.0-preview] - 2025-04-25
+## [v0.1.0-pre-release] - 2025-04-25
 
 ### Added
 
@@ -44,7 +44,3 @@ _Nothing yet — next changes will appear here._
 - Setup script is Windows-only (PowerShell + .bat)
 - No automated tests yet
 - PAC CLI must be installed separately if .NET SDK is not present
-
-[Unreleased]: https://github.com/SteCiu01/Power-Platform-Workspace-One-Click-Setup/compare/v0.1.1-preview...HEAD
-[0.1.1-preview]: https://github.com/SteCiu01/Power-Platform-Workspace-One-Click-Setup/compare/v0.1.0-preview...v0.1.1-preview
-[0.1.0-preview]: https://github.com/SteCiu01/Power-Platform-Workspace-One-Click-Setup/releases/tag/v0.1.0-preview
