@@ -144,38 +144,75 @@ if ($vscodeCmd) {
     }
 }
 
-# Check for pac CLI - try hard to install it automatically if missing.
-# Only fall back to the "agent will help" message if every attempt fails.
+# Check for pac CLI - FORCE-install it if missing. Attempts, in order:
+#   1. .NET global tool  (only if the .NET SDK is already present)
+#   2. Official standalone MSI from https://aka.ms/PowerAppsCLI
+#      (Windows, per-user, NO admin and NO .NET SDK required)
+# The MSI route is what makes this work on a clean machine with no dotnet.
+# Only fall back to the "agent will help" message if EVERY attempt fails.
 if (-not (Get-Command pac -ErrorAction SilentlyContinue)) {
-    Write-Host "pac CLI not found. Attempting automatic installation..." -ForegroundColor Yellow
+    Write-Host "pac CLI not found. Forcing automatic installation..." -ForegroundColor Yellow
 
     $dotnetToolsDir = Join-Path $env:USERPROFILE ".dotnet\tools"
+    # The MSI installs pac per-user under LocalAppData and adds it to the user PATH.
+    $msiToolsDirs = @(
+        (Join-Path $env:LOCALAPPDATA "Microsoft\PowerAppsCLI")
+        (Join-Path ${env:ProgramFiles} "Microsoft Power Platform CLI")
+    )
 
+    # Refreshes the CURRENT session PATH from the registry plus any known tool
+    # dirs. A freshly installed tool often is not on the in-memory PATH yet,
+    # which is the usual reason a successful install still reports "not found".
+    function Update-PacSessionPath {
+        $machinePath = [System.Environment]::GetEnvironmentVariable('PATH', 'Machine')
+        $userPath    = [System.Environment]::GetEnvironmentVariable('PATH', 'User')
+        $extra = @($dotnetToolsDir) + $msiToolsDirs
+        $env:PATH = (@($machinePath, $userPath) + $extra | Where-Object { $_ }) -join ';'
+    }
+
+    # -- Attempt 1: .NET global tool (only if dotnet is available) -------
     if (Get-Command dotnet -ErrorAction SilentlyContinue) {
         try {
-            Write-Host "  Installing via: dotnet tool install --global Microsoft.PowerApps.CLI.Tool" -ForegroundColor DarkGray
+            Write-Host "  Trying .NET tool: Microsoft.PowerApps.CLI.Tool" -ForegroundColor DarkGray
             & dotnet tool install --global Microsoft.PowerApps.CLI.Tool 2>$null
             if ($LASTEXITCODE -ne 0) {
                 # Non-zero usually means it is already installed - make sure it is current
                 & dotnet tool update --global Microsoft.PowerApps.CLI.Tool 2>$null
             }
         } catch { }
-
-        # Refresh PATH for THIS session, including the dotnet global-tools dir.
-        # dotnet does not always add that dir to the persisted PATH right away,
-        # which is the usual reason a fresh install is not detected in-session.
-        $machinePath = [System.Environment]::GetEnvironmentVariable('PATH', 'Machine')
-        $userPath    = [System.Environment]::GetEnvironmentVariable('PATH', 'User')
-        $env:PATH = (@($machinePath, $userPath, $dotnetToolsDir) | Where-Object { $_ }) -join ';'
+        Update-PacSessionPath
     } else {
-        Write-Host "  .NET SDK (dotnet) not found - cannot auto-install pac CLI." -ForegroundColor DarkGray
-        Write-Host "  Install the .NET SDK from https://dotnet.microsoft.com to enable auto-install." -ForegroundColor DarkGray
+        Write-Host "  .NET SDK not present - using the standalone installer instead." -ForegroundColor DarkGray
+    }
+
+    # -- Attempt 2: official standalone MSI (no dependencies) -----------
+    if (-not (Get-Command pac -ErrorAction SilentlyContinue)) {
+        try {
+            $msiUrl  = "https://aka.ms/PowerAppsCLI"
+            $msiPath = Join-Path $env:TEMP "powerapps-cli.msi"
+            Write-Host "  Downloading Power Platform CLI installer..." -ForegroundColor DarkGray
+            $oldProgress = $ProgressPreference
+            $ProgressPreference = 'SilentlyContinue'   # huge speed-up for Invoke-WebRequest
+            Invoke-WebRequest -Uri $msiUrl -OutFile $msiPath -UseBasicParsing
+            $ProgressPreference = $oldProgress
+            if (Test-Path $msiPath) {
+                Write-Host "  Installing pac CLI silently (this can take a minute)..." -ForegroundColor DarkGray
+                $proc = Start-Process msiexec.exe -ArgumentList "/i `"$msiPath`" /quiet /norestart" -Wait -PassThru
+                if ($proc.ExitCode -ne 0) {
+                    Write-Host "  Installer returned exit code $($proc.ExitCode)." -ForegroundColor DarkGray
+                }
+                Remove-Item $msiPath -Force -ErrorAction SilentlyContinue
+            }
+        } catch {
+            Write-Host "  Standalone install failed: $($_.Exception.Message)" -ForegroundColor DarkGray
+        }
+        Update-PacSessionPath
     }
 
     if (Get-Command pac -ErrorAction SilentlyContinue) {
         Write-Host "  pac CLI installed successfully." -ForegroundColor Green
     } else {
-        $warnings += "pac CLI could not be installed automatically - Power Platform Master Agent will help you install it on first run"
+        $warnings += "pac CLI could not be installed automatically - restart your terminal and re-run, or let Power Platform Master Agent guide the install on first run"
     }
 }
 
