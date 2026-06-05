@@ -7,7 +7,9 @@
     Once complete it opens the folder in VS Code - select Power Platform Master Agent
     from the Copilot Chat dropdown and type anything to start.
 .NOTES
-    Requirements: git, VS Code 1.117.0+ with GitHub Copilot, dotnet (for pac CLI)
+    Local authoring flow: git, VS Code 1.117.0+ with GitHub Copilot, pac CLI.
+    Live canvas authoring flow (optional): .NET 10 SDK - provides 'dnx', which
+    runs the Canvas Authoring MCP server used for real-time coauthoring.
 #>
 
 # Keep the window open on any error so the user can read it
@@ -274,6 +276,103 @@ if ($vscodeCmd) {
     } else {
         Write-Host "  GitHub Copilot: not detected via CLI (it may be built in) -" -ForegroundColor DarkGray
         Write-Host "    make sure GitHub Copilot Chat is enabled in VS Code before starting." -ForegroundColor DarkGray
+    }
+}
+
+# -- Live canvas authoring prerequisites (optional, non-blocking) -------
+# The checks above cover the LOCAL/OFFLINE authoring flow (pac CLI:
+# export -> unpack -> edit source -> pack -> import), which is all most
+# users need. The LIVE canvas authoring flow additionally drives Power
+# Apps Studio in real time through the Canvas Authoring MCP server, which
+# is launched with 'dnx' from the .NET 10 SDK. We force-install that SDK
+# when it is missing; if it cannot be installed, live authoring is simply
+# unavailable (a warning, not a blocker) - local authoring still works.
+Write-Host ""
+Write-Host "  -- Live canvas authoring (optional) --" -ForegroundColor DarkGray
+
+function Get-DotNet10Root {
+    # The .NET 10 SDK is often installed per-user (LOCALAPPDATA) while a
+    # different 'dotnet' (e.g. C:\Program Files\dotnet) is first on PATH and
+    # reports no 10.x. Probe every known dotnet.exe and return the directory of
+    # the first one that exposes a 10.x SDK (that dir also contains dnx.cmd).
+    $candidates = @()
+    if ($env:DOTNET_ROOT) { $candidates += (Join-Path $env:DOTNET_ROOT 'dotnet.exe') }
+    $candidates += (Join-Path $env:LOCALAPPDATA 'Microsoft\dotnet\dotnet.exe')
+    if (${env:ProgramFiles})      { $candidates += (Join-Path ${env:ProgramFiles} 'dotnet\dotnet.exe') }
+    if (${env:ProgramFiles(x86)}) { $candidates += (Join-Path ${env:ProgramFiles(x86)} 'dotnet\dotnet.exe') }
+    $onPath = (Get-Command dotnet -ErrorAction SilentlyContinue).Source
+    if ($onPath) { $candidates += $onPath }
+    foreach ($exe in ($candidates | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique)) {
+        try {
+            $sdks = & $exe --list-sdks 2>$null
+            if ($sdks | Where-Object { $_ -match '^\s*10\.' }) { return (Split-Path $exe -Parent) }
+        } catch { }
+    }
+    return $null
+}
+
+function Add-DirToPath {
+    # Add a directory to the current session PATH and persist it (user scope),
+    # so VS Code can resolve 'dnx' on future launches. Idempotent.
+    param([string]$Dir)
+    if (-not $Dir) { return }
+    if ($env:PATH -notlike "*$Dir*") {
+        $env:PATH = (@($Dir, $env:PATH) | Where-Object { $_ }) -join ';'
+    }
+    try {
+        $userPath = [System.Environment]::GetEnvironmentVariable('PATH', 'User')
+        if ($userPath -notlike "*$Dir*") {
+            [System.Environment]::SetEnvironmentVariable(
+                'PATH', ((@($userPath, $Dir) | Where-Object { $_ }) -join ';'), 'User')
+        }
+    } catch { }
+}
+
+$net10Root = Get-DotNet10Root
+if ($net10Root) {
+    Add-DirToPath $net10Root
+    Write-Host "  .NET 10 SDK: detected (live canvas authoring available)" -ForegroundColor Green
+} else {
+    Write-Host "  .NET 10 SDK not found - attempting install (needed only for LIVE canvas authoring)..." -ForegroundColor Yellow
+    $dotnetInstallDir = Join-Path $env:LOCALAPPDATA "Microsoft\dotnet"
+
+    $dlOk = $true
+    $installerScript = Join-Path $env:TEMP "dotnet-install.ps1"
+    try {
+        $oldProgress = $ProgressPreference
+        $ProgressPreference = 'SilentlyContinue'
+        Invoke-WebRequest -Uri "https://dot.net/v1/dotnet-install.ps1" -OutFile $installerScript -UseBasicParsing
+        $ProgressPreference = $oldProgress
+    } catch {
+        $dlOk = $false
+        Write-Host "  Could not download the .NET install script: $($_.Exception.Message)" -ForegroundColor DarkGray
+    }
+
+    if ($dlOk -and (Test-Path $installerScript)) {
+        Write-Host "  Installing .NET 10 SDK (per-user, no admin; this can take a few minutes)..." -ForegroundColor DarkGray
+        # Run in a child process so the official script cannot 'exit' or throw into this session.
+        $psHost = (Get-Process -Id $PID -ErrorAction SilentlyContinue).Path
+        if (-not $psHost) { $psHost = "powershell" }
+        try {
+            Start-Process -FilePath $psHost -Wait -NoNewWindow -ArgumentList @(
+                "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $installerScript,
+                "-Channel", "10.0", "-InstallDir", $dotnetInstallDir, "-NoPath"
+            )
+        } catch {
+            Write-Host "  .NET 10 SDK install failed: $($_.Exception.Message)" -ForegroundColor DarkGray
+        }
+        Remove-Item $installerScript -Force -ErrorAction SilentlyContinue
+        $env:DOTNET_ROOT = $dotnetInstallDir
+    }
+
+    $net10Root = Get-DotNet10Root
+    if ($net10Root) {
+        Add-DirToPath $net10Root
+        Write-Host "  .NET 10 SDK installed (live canvas authoring available)." -ForegroundColor Green
+    } else {
+        $warnings += "Local authoring is ready, but LIVE canvas authoring is NOT enabled yet -" + [Environment]::NewLine +
+                     "             it needs the .NET 10 SDK (https://dotnet.microsoft.com/download/dotnet/10.0)." + [Environment]::NewLine +
+                     "             Install it, open a new terminal, then re-run this installer to enable live authoring."
     }
 }
 
@@ -855,6 +954,63 @@ handles it, list all plugin `skills/` directories to find the right match.
 - After any edit, always run git diff and summarise what changed
 - Ask for confirmation before packing or pushing
 
+#### Two ways to edit a CANVAS app
+
+There are two distinct editing flows. Pick based on what the user wants and
+what is available. Canvas apps are the ONLY component type that supports the
+live flow today.
+
+**A) OFFLINE editing (default - works for every component type)**
+- Pull the solution (export -> unpack) so the source is local
+- Edit the unpacked PA YAML / source files, following the canvas-apps SKILL.md
+- Show a git diff, then pack and import to apply the changes
+- Changes appear in Power Apps Studio only after import + a refresh
+- No extra prerequisites beyond the pac CLI
+
+**B) LIVE editing (canvas apps only - real-time coauthoring via MCP)**
+This drives an OPEN Power Apps Studio session in real time using the
+`canvas-authoring` MCP server (registered in `.vscode/mcp.json`).
+
+Prerequisites - verify before starting:
+- `.NET 10 SDK` is installed (`dotnet --list-sdks` shows a `10.x` line).
+  It provides `dnx`, which launches the MCP server. If it is missing, tell
+  the user to install it (https://dotnet.microsoft.com/download/dotnet/10.0)
+  or re-run the workspace installer, then fall back to OFFLINE editing.
+- The MCP server `canvas-authoring` is present in `.vscode/mcp.json` (the
+  installer adds it). VS Code starts it on demand.
+
+Step-by-step (guide the user through this - it is not all automatic):
+1. Open the target app in **Power Apps Studio** (make.powerapps.com) in
+   **edit** mode, in a browser.
+2. In Studio, enable coauthoring: **Settings -> Updates -> Coauthoring**,
+   toggle it ON, and save/reopen the app if prompted. Live editing does
+   NOT work unless coauthoring is enabled for that app.
+3. **Keep that browser tab OPEN for the whole session.** Closing it ends
+   coauthoring and breaks compile_canvas / sync_canvas.
+4. Copy the full Studio URL from the address bar (it looks like
+   https://make.powerapps.com/e/<env>/canvas/?action=edit&app-id=...).
+5. In Copilot Chat (this agent), say e.g. "connect live canvas authoring"
+   and paste the Studio URL.
+6. The agent extracts the connection parameters from the URL and calls the
+   MCP connect tool:
+   - environment_id = the segment between /e/ and the next /
+   - app_id = URL-decode the app-id value, take the last / segment
+   - cluster_category = from the host: make.powerapps.com -> prod,
+     make.preview.powerapps.com -> prod, make.gov.powerapps.us -> gov,
+     make.high.powerapps.us -> high, make.apps.appsplatform.us -> dod,
+     make.powerapps.cn -> china, anything else -> test
+   (Do not prompt for optional params like auth_flow / login_hint unless
+   sign-in needs them.)
+7. Once connected, make edits by asking in natural language. The agent uses
+   the MCP tools (list_controls, describe_control, compile_canvas,
+   sync_canvas, list_data_sources, etc.) to apply and validate changes,
+   which appear in the open Studio tab in near real time.
+8. To stop, just close the Studio tab. There is nothing to pack/import -
+   live changes are already in the app.
+
+When unsure which flow to use, or if any live-flow prerequisite is missing,
+use OFFLINE editing.
+
 ### COMPARE environments
 - Pull the same solution from two different environments
 - Run git diff between the two unpacked folders
@@ -927,6 +1083,29 @@ $requiredSettings = @{
 $existed = Test-Path $settingsJsonPath
 Merge-JsonSettings $settingsJsonPath $requiredSettings
 Write-Host "  $(if ($existed) {'Merged'} else {'Created'}) .vscode/settings.json"
+
+# -- .vscode/mcp.json (Canvas Authoring MCP server -- LIVE canvas editing) --
+# Registers Microsoft's Canvas Authoring MCP server so the agent can drive
+# Power Apps Studio in real time. Launched via 'dnx' (ships with the .NET 10
+# SDK installed in Step 2). Merged so any user-added MCP servers are kept.
+$mcpJsonPath = "$rootPath\.vscode\mcp.json"
+$requiredMcp = @{
+    "servers" = @{
+        "canvas-authoring" = @{
+            "command" = "dnx"
+            "args" = @(
+                "Microsoft.PowerApps.CanvasAuthoring.McpServer"
+                "--yes"
+                "--prerelease"
+                "--source"
+                "https://api.nuget.org/v3/index.json"
+            )
+        }
+    }
+}
+$mcpExisted = Test-Path $mcpJsonPath
+Merge-JsonSettings $mcpJsonPath $requiredMcp
+Write-Host "  $(if ($mcpExisted) {'Merged'} else {'Created'}) .vscode/mcp.json (canvas-authoring MCP server)"
 
 Write-Host "`nAll configuration files ready." -ForegroundColor Green
 Read-Host "`nPress Enter to continue..."

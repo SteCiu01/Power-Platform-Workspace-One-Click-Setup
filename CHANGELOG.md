@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _Nothing yet — next changes will appear here._
 
+## [v0.2.0-pre-release] - 2026-06-05
+
+### Added
+
+- **Live canvas authoring (real-time coauthoring via MCP)** — the installer now registers Microsoft's Canvas Authoring MCP server in `.vscode/mcp.json` (launched on demand via `dnx`). With an app open in Power Apps Studio and coauthoring enabled, Power Platform Master Agent connects from the Studio URL and edits the live app in real time — no pack/import round-trip
+- **Automatic .NET 10 SDK install** — Step 2 detects and force-installs the .NET 10 SDK (per-user, no admin, via the official `dotnet-install` script), which provides the `dnx` command the MCP server runs on. Non-blocking: if it can't be installed, a warning explains that live authoring is unavailable while local authoring still works
+- **Two separated prerequisite batches** — the installer now distinguishes the **local authoring flow** (git, VS Code 1.117.0+, pac CLI, Copilot) from the optional **live authoring flow** (.NET 10 SDK), checking and reporting each independently
+- **Offline vs live editing guidance** — the agent's working-flow reference now documents both canvas editing paths, with detailed step-by-step live-authoring instructions (enable coauthoring under Settings → Updates → Coauthoring, keep the Studio tab open, connect via the Studio URL, parameter extraction rules)
+- README sections covering the two authoring flows, the `.NET 10 SDK` prerequisite, the `.vscode/mcp.json` server, and a live-authoring FAQ
+
+### Changed
+
+- **PAC CLI install is now forced for everyone** — it installs automatically via the .NET tool when a .NET SDK is present, otherwise via the standalone Power Platform CLI MSI (per-user, no admin), instead of only installing when .NET happened to be available
+- Prerequisites table and FAQ in the README updated to reflect the automatic pac install and the new live-authoring requirements
+
+### Fixed
+
+- pac CLI failing to install on machines without the .NET SDK — the standalone MSI fallback now covers clean machines
+
 ## [v0.1.1-pre-release] - 2026-04-29
 
 ### Added

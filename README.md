@@ -85,7 +85,8 @@ Before running the installer, make sure you have:
 | **VS Code 1.117.0+** | Yes | [code.visualstudio.com](https://code.visualstudio.com) — older versions have known bugs that break Copilot agent tools |
 | **GitHub Copilot + Agent Mode** | Yes | Install from VS Code Extensions marketplace. Agent mode must be enabled (`chat.agent.enabled`). Note: org tenants may need admin to enable this. |
 | **Git** | Yes | [git-scm.com](https://git-scm.com) |
-| **PAC CLI** | Recommended | Auto-installed if .NET SDK is present, or the agent will guide you on first run |
+| **PAC CLI** | Auto-installed | The installer installs it for you (via .NET tool or the standalone MSI) — no action needed |
+| **.NET 10 SDK** | Live authoring only | Needed **only** for the live canvas authoring flow (real-time coauthoring via MCP). The installer auto-installs it; if that fails, grab it from [dotnet.microsoft.com](https://dotnet.microsoft.com/download/dotnet/10.0). Offline editing works without it |
 | **[Power Platform Tools](https://marketplace.visualstudio.com/items?itemName=microsoft-IsvExpTools.powerplatform-vscode)** | Nice to have | Adds visual auth/environment panels, YAML language support, and auto-provides the PAC CLI. Not required — the agent works independently |
 
 ---
@@ -212,6 +213,46 @@ For components not yet covered by a dedicated skill — **Power Automate flows**
 > the skills repo via git — which you already have — so there's zero extra
 > tooling or permissions needed. See [FAQ](#faq) for details.
 
+### Editing canvas apps: offline vs live (real-time)
+
+Canvas apps can be edited two ways. The agent picks the right one for you, but
+it helps to know the difference.
+
+**Offline editing (default — works for every component type)**
+
+The agent pulls the solution, edits the unpacked PA YAML source on disk
+following the canvas-apps skill, shows you a diff, then packs and imports.
+Your changes show up in Power Apps Studio after the import and a refresh.
+Nothing extra is required beyond the PAC CLI.
+
+**Live editing (canvas apps only — real-time coauthoring via MCP)**
+
+The agent drives an **open Power Apps Studio session in real time** through
+Microsoft's **Canvas Authoring MCP server**, which the installer registers in
+`.vscode/mcp.json`. Edits appear in the open Studio tab as the agent makes
+them — no pack/import step.
+
+This flow needs the **.NET 10 SDK** (the installer auto-installs it; it
+provides the `dnx` command that runs the MCP server). To use it:
+
+1. Open your app in **Power Apps Studio** (make.powerapps.com) in **edit** mode.
+2. Turn on coauthoring: **Settings → Updates → Coauthoring** — toggle it **on**
+   and save. Live editing only works when coauthoring is enabled for that app.
+3. **Keep that browser tab open** for the whole session — closing it ends
+   coauthoring and breaks the connection.
+4. Copy the full Studio URL from the address bar.
+5. In **Copilot Chat**, with **Power Platform Master Agent** selected, say
+   something like *"connect live canvas authoring"* and paste the Studio URL.
+   The agent reads the environment, app, and cluster from the URL and connects
+   the MCP server.
+6. Ask for changes in plain English — *"add a submit button to the Home
+   screen"* — and watch them land in the open Studio tab. Close the tab when
+   you're done; the changes are already in your app.
+
+> If the .NET 10 SDK isn't installed (or a step above isn't met), the agent
+> falls back to offline editing automatically — you lose the real-time aspect,
+> not the ability to edit.
+
 ### Conflict resolution and sync
 
 When your local files and the platform are out of sync, the agent handles it:
@@ -242,6 +283,10 @@ Power Platform/
 │   ├── agents/
 │   │   └── power-platform-master-agent.agent.md   ← the agent brain
 │   └── copilot-instructions.md                    ← workspace-level Copilot context
+├── .vscode/
+│   ├── mcp.json                                   ← Canvas Authoring MCP server (live editing)
+│   ├── settings.json
+│   └── tasks.json
 ├── .gitignore
 ├── AGENTS.md                                      ← quick-reference guide
 ├── deploy/                                        ← packed .zip files for import
@@ -287,8 +332,19 @@ files completely untouched.
 A: Yes. The workspace is fully portable. Just open the new location in VS Code.
 
 **Q: What if I don't have the PAC CLI installed?**
-A: The script will warn you but still create everything. When you start your
-first session, Power Platform Master Agent will guide you through installing it.
+A: You don't need to install it yourself. The installer sets it up
+automatically — via the .NET tool if a .NET SDK is present, otherwise via the
+standalone Power Platform CLI MSI (per-user, no admin rights). If it somehow
+can't be installed, the workspace is still created and Power Platform Master
+Agent will guide you on first run.
+
+**Q: What do I need for live (real-time) canvas authoring?**
+A: The **.NET 10 SDK** (the installer auto-installs it) plus an **open Power
+Apps Studio tab with coauthoring enabled** (Settings → Updates → Coauthoring).
+The installer registers Microsoft's Canvas Authoring MCP server in
+`.vscode/mcp.json`; the agent connects to it from the Studio URL you paste in
+chat. If the SDK isn't available, offline editing still works — see
+[Editing canvas apps: offline vs live](#editing-canvas-apps-offline-vs-live-real-time).
 
 **Q: Does this work on macOS or Linux?**
 A: The setup script is Windows-only (PowerShell + .bat). However, the
@@ -315,7 +371,7 @@ run `git -C power-platform-skills pull` manually.
 
 ---
 
-## Current status (v0.1.1-preview)
+## Current status (v0.2.0-preview)
 
 | Area | Status |
 |---|---|
@@ -323,6 +379,8 @@ run `git -C power-platform-skills pull` manually.
 | Agent session flow (auth → env → inventory → sync) | **Working** — tested daily |
 | Pull / push / compare / status commands | **Working** |
 | Skill-based editing via local SKILL.md files | **Working** — agent reads and follows instructions from the cloned repo |
+| Offline canvas/component editing (export → edit → import) | **Working** |
+| Live canvas authoring (real-time coauthoring via MCP) | **New in v0.2.0** — needs the .NET 10 SDK (auto-installed) |
 
 This is a pre-release. Expect rough edges. If something breaks, [open an issue](https://github.com/SteCiu01/Power-Platform-Workspace-One-Click-Setup/issues).
 
