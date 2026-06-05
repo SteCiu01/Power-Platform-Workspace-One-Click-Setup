@@ -144,19 +144,38 @@ if ($vscodeCmd) {
     }
 }
 
-# Check for pac CLI (soft requirement - Power Platform Master Agent can guide install later)
+# Check for pac CLI - try hard to install it automatically if missing.
+# Only fall back to the "agent will help" message if every attempt fails.
 if (-not (Get-Command pac -ErrorAction SilentlyContinue)) {
-    Write-Host "pac CLI not found. Attempting to install via dotnet..." -ForegroundColor Yellow
-    try {
-        if (Get-Command dotnet -ErrorAction SilentlyContinue) {
+    Write-Host "pac CLI not found. Attempting automatic installation..." -ForegroundColor Yellow
+
+    $dotnetToolsDir = Join-Path $env:USERPROFILE ".dotnet\tools"
+
+    if (Get-Command dotnet -ErrorAction SilentlyContinue) {
+        try {
+            Write-Host "  Installing via: dotnet tool install --global Microsoft.PowerApps.CLI.Tool" -ForegroundColor DarkGray
             & dotnet tool install --global Microsoft.PowerApps.CLI.Tool 2>$null
-            # Refresh PATH so the newly installed tool is discoverable in this session
-            $env:PATH = [System.Environment]::GetEnvironmentVariable('PATH', 'Machine') + ';' +
-                        [System.Environment]::GetEnvironmentVariable('PATH', 'User')
-        }
-    } catch { }
-    if (-not (Get-Command pac -ErrorAction SilentlyContinue)) {
-        $warnings += "pac CLI not found - Power Platform Master Agent will help you install it on first run"
+            if ($LASTEXITCODE -ne 0) {
+                # Non-zero usually means it is already installed - make sure it is current
+                & dotnet tool update --global Microsoft.PowerApps.CLI.Tool 2>$null
+            }
+        } catch { }
+
+        # Refresh PATH for THIS session, including the dotnet global-tools dir.
+        # dotnet does not always add that dir to the persisted PATH right away,
+        # which is the usual reason a fresh install is not detected in-session.
+        $machinePath = [System.Environment]::GetEnvironmentVariable('PATH', 'Machine')
+        $userPath    = [System.Environment]::GetEnvironmentVariable('PATH', 'User')
+        $env:PATH = (@($machinePath, $userPath, $dotnetToolsDir) | Where-Object { $_ }) -join ';'
+    } else {
+        Write-Host "  .NET SDK (dotnet) not found - cannot auto-install pac CLI." -ForegroundColor DarkGray
+        Write-Host "  Install the .NET SDK from https://dotnet.microsoft.com to enable auto-install." -ForegroundColor DarkGray
+    }
+
+    if (Get-Command pac -ErrorAction SilentlyContinue) {
+        Write-Host "  pac CLI installed successfully." -ForegroundColor Green
+    } else {
+        $warnings += "pac CLI could not be installed automatically - Power Platform Master Agent will help you install it on first run"
     }
 }
 
