@@ -176,20 +176,48 @@ if (Get-Command git -ErrorAction SilentlyContinue) {
     }
 }
 
-# Check for the GitHub Copilot extension (the Master Agent requires it)
+# Check for GitHub Copilot (the Master Agent requires it).
+# Notes:
+#  - `code --list-extensions` only reports user-installed marketplace extensions
+#    and is unreliable while VS Code is running (can return an empty list).
+#  - Modern VS Code builds ship Copilot as a BUILT-IN extension, which never
+#    appears in --list-extensions, so we also probe the install tree.
+#  - Absence cannot be proven, so we only inform - we never hard-warn.
 if ($vscodeCmd) {
+    $copilotFound = $false
+
+    # 1) Ask the CLI (retry once to absorb flakiness)
     try {
         $exts = & $vscodeCmd --list-extensions 2>$null
-        $hasCopilot     = $exts -contains 'GitHub.copilot'
-        $hasCopilotChat = $exts -contains 'GitHub.copilot-chat'
-        if ($hasCopilot -and $hasCopilotChat) {
-            Write-Host "  GitHub Copilot + Copilot Chat: installed" -ForegroundColor Green
-        } else {
-            $warnings += "GitHub Copilot / Copilot Chat extension not detected - the Power Platform" + [Environment]::NewLine +
-                         "             Master Agent needs it. Install from the Extensions view (search 'GitHub Copilot')."
-        }
+        if (-not $exts) { $exts = & $vscodeCmd --list-extensions 2>$null }
+        if ($exts | Where-Object { $_ -match 'copilot' }) { $copilotFound = $true }
     } catch {
         # --list-extensions can fail on some shims; non-fatal
+    }
+
+    # 2) Probe built-in (bundled) extensions of the resolved install
+    if (-not $copilotFound) {
+        try {
+            $cmdPath = (Get-Command $vscodeCmd -ErrorAction SilentlyContinue).Source
+            if (-not $cmdPath) { $cmdPath = $vscodeCmd }
+            $installRoot = Split-Path (Split-Path $cmdPath -Parent) -Parent   # ...\bin\code.cmd -> root
+            if ($installRoot -and (Test-Path $installRoot)) {
+                $copilotProbe = @(
+                    (Join-Path $installRoot 'resources\app\extensions\copilot')
+                    (Join-Path $installRoot '*\resources\app\extensions\copilot')
+                )
+                foreach ($p in $copilotProbe) {
+                    if (Test-Path $p -PathType Container) { $copilotFound = $true; break }
+                }
+            }
+        } catch { }
+    }
+
+    if ($copilotFound) {
+        Write-Host "  GitHub Copilot: detected" -ForegroundColor Green
+    } else {
+        Write-Host "  GitHub Copilot: not detected via CLI (it may be built in) -" -ForegroundColor DarkGray
+        Write-Host "    make sure GitHub Copilot Chat is enabled in VS Code before starting." -ForegroundColor DarkGray
     }
 }
 
