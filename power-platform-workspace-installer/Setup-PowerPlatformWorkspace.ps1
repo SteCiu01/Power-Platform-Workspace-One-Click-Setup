@@ -27,32 +27,45 @@ function Show-Step ([int]$Number, [int]$Total, [string]$Title) {
     Write-Host ""
 }
 
+# -- Helper: recursively merge required keys into an existing value ----
+# Merges $Required (hashtable) into $Existing (PSCustomObject or hashtable
+# parsed from JSON). Required keys are added/overwritten; any user-added
+# keys at every depth are preserved. Returns an [ordered] hashtable.
+function Merge-SettingValue ($Existing, [hashtable]$Required) {
+    $merged = [ordered]@{}
+    # Seed with everything the user already has (preserve their additions)
+    if ($Existing -is [System.Collections.IDictionary]) {
+        foreach ($k in $Existing.Keys) { $merged[$k] = $Existing[$k] }
+    } elseif ($Existing -is [PSCustomObject]) {
+        foreach ($prop in $Existing.PSObject.Properties) { $merged[$prop.Name] = $prop.Value }
+    }
+    foreach ($key in $Required.Keys) {
+        $val = $Required[$key]
+        $cur = if ($merged.Contains($key)) { $merged[$key] } else { $null }
+        $curIsObj = ($cur -is [PSCustomObject]) -or ($cur -is [System.Collections.IDictionary])
+        if ($val -is [hashtable] -and $curIsObj) {
+            # Both sides are objects -- recurse so nested user keys survive
+            $merged[$key] = Merge-SettingValue $cur $val
+        } else {
+            $merged[$key] = $val
+        }
+    }
+    return $merged
+}
+
 # -- Helper: merge installer-owned keys into existing JSON settings -----
 function Merge-JsonSettings ([string]$Path, [hashtable]$Required) {
-    $existing = [ordered]@{}
+    $parsed = $null
     if (Test-Path $Path) {
         try {
             $parsed = Get-Content $Path -Raw | ConvertFrom-Json
-            foreach ($prop in $parsed.PSObject.Properties) {
-                $existing[$prop.Name] = $prop.Value
-            }
         } catch {
             # Malformed JSON -- back up and start fresh
             Copy-Item $Path "$Path.bak" -Force
             Write-Host "  Backed up malformed settings.json to settings.json.bak" -ForegroundColor Yellow
         }
     }
-    foreach ($key in $Required.Keys) {
-        $val = $Required[$key]
-        if ($val -is [hashtable] -and $existing.Contains($key) -and $existing[$key] -is [PSCustomObject]) {
-            # Deep merge: add missing sub-keys, preserve user additions
-            foreach ($sk in $val.Keys) {
-                $existing[$key] | Add-Member -NotePropertyName $sk -NotePropertyValue $val[$sk] -Force
-            }
-        } else {
-            $existing[$key] = $val
-        }
-    }
+    $existing = Merge-SettingValue $parsed $Required
     $json = $existing | ConvertTo-Json -Depth 10
     $dir = Split-Path $Path -Parent
     if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
@@ -144,6 +157,39 @@ if (-not (Get-Command pac -ErrorAction SilentlyContinue)) {
     } catch { }
     if (-not (Get-Command pac -ErrorAction SilentlyContinue)) {
         $warnings += "pac CLI not found - Power Platform Master Agent will help you install it on first run"
+    }
+}
+
+# Surface the PowerShell edition/version (informational - both 5.1 and 7+ work)
+Write-Host "  PowerShell: $($PSVersionTable.PSEdition) $($PSVersionTable.PSVersion)" -ForegroundColor DarkGray
+
+# Check git identity early (soft) - required later for the initial commit
+if (Get-Command git -ErrorAction SilentlyContinue) {
+    $gitUserCheck  = git config user.name  2>$null
+    $gitEmailCheck = git config user.email 2>$null
+    if ([string]::IsNullOrWhiteSpace($gitUserCheck) -or [string]::IsNullOrWhiteSpace($gitEmailCheck)) {
+        $warnings += "git identity not set - the initial commit will be skipped until you run:" + [Environment]::NewLine +
+                     "             git config --global user.name 'Your Name'" + [Environment]::NewLine +
+                     "             git config --global user.email 'you@example.com'"
+    } else {
+        Write-Host "  Git identity: $gitUserCheck <$gitEmailCheck>" -ForegroundColor Green
+    }
+}
+
+# Check for the GitHub Copilot extension (the Master Agent requires it)
+if ($vscodeCmd) {
+    try {
+        $exts = & $vscodeCmd --list-extensions 2>$null
+        $hasCopilot     = $exts -contains 'GitHub.copilot'
+        $hasCopilotChat = $exts -contains 'GitHub.copilot-chat'
+        if ($hasCopilot -and $hasCopilotChat) {
+            Write-Host "  GitHub Copilot + Copilot Chat: installed" -ForegroundColor Green
+        } else {
+            $warnings += "GitHub Copilot / Copilot Chat extension not detected - the Power Platform" + [Environment]::NewLine +
+                         "             Master Agent needs it. Install from the Extensions view (search 'GitHub Copilot')."
+        }
+    } catch {
+        # --list-extensions can fail on some shims; non-fatal
     }
 }
 
@@ -789,9 +835,6 @@ if ($updateMode -or -not (Test-Path $tasksJsonPath)) {
 $settingsJsonPath = "$rootPath\.vscode\settings.json"
 $requiredSettings = @{
     "task.allowAutomaticTasks" = "on"
-    "chat.agentSkillsLocations" = @{
-        ".github/skills" = $true
-    }
     "git.ignoreLimitWarning" = $true
     "search.exclude" = @{
         "power-platform-skills/" = $true
