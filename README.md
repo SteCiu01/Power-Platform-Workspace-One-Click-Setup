@@ -1,6 +1,6 @@
 # Power Platform Workspace — One-Click Setup 
 
-[![Latest Release](https://img.shields.io/github/v/release/SteCiu01/Power-Platform-Workspace-One-Click-Setup?include_prereleases&label=version)](https://github.com/SteCiu01/Power-Platform-Workspace-One-Click-Setup/releases)
+[![Latest Release](https://img.shields.io/github/v/release/SteCiu01/Power-Platform-Workspace-One-Click-Setup?include_prereleases&sort=semver&display_name=tag&label=version)](https://github.com/SteCiu01/Power-Platform-Workspace-One-Click-Setup/releases)
 
 Pre-release — functional and tested, evolving fast.
 Contributions and feedback welcome.
