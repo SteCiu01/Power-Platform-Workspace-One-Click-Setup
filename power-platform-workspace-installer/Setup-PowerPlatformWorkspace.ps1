@@ -103,7 +103,11 @@ Show-Step 2 $totalSteps "Checking Prerequisites"
 
 $missing = @()
 $warnings = @()
-if (-not (Get-Command git -ErrorAction SilentlyContinue))  { $missing += "git (https://git-scm.com)" }
+if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+    $missing += "git (https://git-scm.com)"
+} else {
+    Write-Host "  Git: detected" -ForegroundColor Green
+}
 
 # Detect which VS Code command to use - user setup takes priority over system setup
 $vscodeCmd = $null
@@ -216,6 +220,8 @@ if (-not (Get-Command pac -ErrorAction SilentlyContinue)) {
     } else {
         $warnings += "pac CLI could not be installed automatically - restart your terminal and re-run, or let Power Platform Master Agent guide the install on first run"
     }
+} else {
+    Write-Host "  PAC CLI: detected" -ForegroundColor Green
 }
 
 # Surface the PowerShell edition/version (informational - both 5.1 and 7+ work)
@@ -276,6 +282,40 @@ if ($vscodeCmd) {
     } else {
         Write-Host "  GitHub Copilot: not detected via CLI (it may be built in) -" -ForegroundColor DarkGray
         Write-Host "    make sure GitHub Copilot Chat is enabled in VS Code before starting." -ForegroundColor DarkGray
+    }
+}
+
+# -- Power Platform Tools extension (optional) -------------------------
+# Adds visual auth/environment panels and YAML support. The agent works
+# without it, so this is non-blocking: we detect it and, if absent, install
+# it via 'code --install-extension' (works even while VS Code is running).
+if ($vscodeCmd) {
+    $ppToolsId = 'microsoft-IsvExpTools.powerplatform-vscode'
+    $ppFound = $false
+    try {
+        $exts = & $vscodeCmd --list-extensions 2>$null
+        if (-not $exts) { $exts = & $vscodeCmd --list-extensions 2>$null }
+        if ($exts | Where-Object { $_ -ieq $ppToolsId }) { $ppFound = $true }
+    } catch { }
+
+    if ($ppFound) {
+        Write-Host "  Power Platform Tools: detected" -ForegroundColor Green
+    } else {
+        Write-Host "  Power Platform Tools not found - attempting install (optional)..." -ForegroundColor Yellow
+        try {
+            & $vscodeCmd --install-extension $ppToolsId --force 2>$null | Out-Null
+        } catch { }
+        $ppFound = $false
+        try {
+            $exts = & $vscodeCmd --list-extensions 2>$null
+            if ($exts | Where-Object { $_ -ieq $ppToolsId }) { $ppFound = $true }
+        } catch { }
+        if ($ppFound) {
+            Write-Host "  Power Platform Tools installed (restart VS Code to activate)." -ForegroundColor Green
+        } else {
+            $warnings += "Power Platform Tools extension could not be installed automatically (optional) -" + [Environment]::NewLine +
+                         "             install it from the VS Code Marketplace for the visual auth/environment panels."
+        }
     }
 }
 
@@ -401,6 +441,8 @@ $dirs = @(
     "$rootPath\scripts"
     "$rootPath\.github\agents"
     "$rootPath\.github\agent-docs"
+    "$rootPath\.github\hooks"
+    "$rootPath\.github\skills\pbi-powerapps-integration"
     "$rootPath\.vscode"
 )
 foreach ($d in $dirs) {
@@ -508,11 +550,19 @@ Select it from the Copilot Chat agent dropdown to begin.
 
 ## Skills
 
-Microsoft Power Platform skills are cloned locally in `power-platform-skills/`.
-Before performing any skill-based task, read the relevant `SKILL.md` under
-`power-platform-skills/plugins/<plugin>/skills/`.
+Two skill sources, read both:
 
-Available plugins: canvas-apps, code-apps, model-apps, power-pages, mcp-apps.
+1. **Microsoft Power Platform skills** (cloned, gitignored) live in
+   `power-platform-skills/`. Before any skill-based task, read the relevant
+   `SKILL.md` under `power-platform-skills/plugins/<plugin>/skills/`.
+   Available plugins: canvas-apps, code-apps, model-apps, power-pages, mcp-apps.
+2. **Custom embedded skills** (committed, maintainer house style) live in
+   `.github/skills/<name>/SKILL.md`. Currently:
+   `.github/skills/pbi-powerapps-integration/SKILL.md` - read it for any work on
+   a canvas app embedded in a Power BI report (the `PowerBIIntegration` object,
+   stale-schema issues, field-well changes). It layers first-hand knowledge on
+   top of the cloned canvas-apps skills; the custom skill takes precedence where
+   they overlap.
 
 ## Workspace conventions
 
@@ -552,7 +602,7 @@ Single entry point. Select this in the Copilot Chat dropdown.
 Routes between two modes automatically:
 
 **Starting mode** (defined in `.github/agent-docs/starting-flow.md`):
-skill update -> auth -> environment selection -> inventory -> local sync
+skills -> sign in -> environment -> readiness (incl. live authoring) -> inventory -> sync
 
 **Working mode** (defined in `.github/agent-docs/working-flow-reference.md`):
 full ALM lifecycle using power-platform-skills plugins
@@ -569,6 +619,7 @@ deploy/                 ? packed .zip files ready to import
 scripts/                ? pac-workflows.ps1 helper script
 power-platform-skills/  ? cloned Microsoft skills repo (gitignored)
 .github/agents/         ? agent definitions
+.github/skills/         ? custom embedded skills (committed, house style)
 ```
 
 ---
@@ -579,6 +630,7 @@ power-platform-skills/  ? cloned Microsoft skills repo (gitignored)
 "pull [SolutionName]"          -> export + unpack + commit
 "push [SolutionName] to TEST"  -> pack + import + commit
 "edit [component] in [solution]" -> agentic edit using skills
+"live edit [app]"              -> real-time canvas coauthoring (open browser + MCP)
 "new solution [name]"          -> scaffold new solution
 "compare DEV and TEST"         -> diff two environments
 "status"                       -> auth + solutions + git summary
@@ -596,52 +648,73 @@ if ($updateMode -or -not (Test-Path $agentPath)) {
     @'
 ---
 name: "Power Platform Master Agent"
-description: "Master coordinator for all Power Platform work. Use when - Power Platform, pac CLI, solution management, environment sync, pull, push, deploy, ALM lifecycle."
-tools: [execute, read, edit, search, agent, todo]
+description: "Master coordinator for all Power Platform work. Use when - Power Platform, pac CLI, canvas apps, live coauthoring, solution management, environment sync, pull, push, deploy, ALM lifecycle."
+tools: [execute, read, edit, search, agent, todo, canvas-authoring/*]
 ---
 
-# MANDATORY SESSION INITIALIZATION - RUNS BEFORE ANYTHING ELSE
+# Power Platform Master Agent
 
-**YOU MUST COMPLETE THE STARTING FLOW (Phases 0-6) BEFORE RESPONDING TO ANY
-USER REQUEST. THERE ARE ZERO EXCEPTIONS TO THIS RULE.**
+You are the single entry point for Power Platform work. You always get the user
+set up first (skills, sign-in, environment, readiness), then you help them work.
+Two kinds of work, both equally important:
 
-Do NOT answer questions. Do NOT perform tasks. Do NOT greet the user and wait.
-The ONLY thing you do on your first turn is: execute the mandatory tool calls
-below, then follow the Starting Flow.
+- **Offline authoring** - export -> unpack -> edit -> pack -> import via pac.
+  Works for EVERY component (canvas apps, Power Automate flows, model-driven
+  forms/views, pages, code apps, ...).
+- **Live coauthoring** - real-time editing of an open Power Apps Studio browser
+  tab via the `canvas-authoring` MCP tools. Canvas apps only.
 
-**Your very first action - before reading the user's message, before responding,
-before doing anything else - is to execute these tool calls:**
+You route automatically; the user never switches agents or modes.
 
-1. Read file: `.github/copilot-instructions.md`
-2. Read file: `AGENTS.md`
-3. Run terminal: `git -C power-platform-skills pull --ff-only`
+## First turn of a session
 
-These three tool calls are UNCONDITIONAL. Execute them NOW.
+A SessionStart hook (`.github/hooks/clear-session.json`) deletes any leftover
+`.session-active` marker when a new chat session begins - so a MISSING marker
+reliably means "new session, not set up yet." Before responding, read these two
+files to load context and warm up the tools:
 
----
+1. Read `.github/copilot-instructions.md`
+2. Read `AGENTS.md`
 
-## SELF-CHECK - REPEAT THIS BEFORE EVERY RESPONSE
+If both fail, read `scripts/pac-workflows.ps1` and retry once. If it still
+fails, show the **VS Code tool error** message below and stop.
 
-Before generating ANY response to the user, ask yourself:
+## Routing
 
-> "Has an environment been confirmed and synced in this conversation?"
+- **`.session-active` EXISTS** -> you're already set up this session. Read
+  `.github/agent-docs/working-flow-reference.md` and handle the request.
 
-- If **NO**: you MUST be in the Starting Flow. Do NOT answer the user's
-  question. Do NOT provide help. Resume the Starting Flow from wherever
-  you left off.
-- If **YES** and `.session-active` exists: you are in Working Flow. Proceed.
+- **`.session-active` does NOT exist** -> fresh session. Don't railroad the user
+  through full setup. Offer a quick choice first, in one friendly line:
 
-This check applies to EVERY turn, including the first one.
+  "Want me to run the full setup (sign-in, environment, sync, readiness), or
+   just get to work? [S] set me up - [W] just work"
 
----
+  - **S - full setup** -> read `.github/agent-docs/starting-flow.md` and run it
+    end to end (it writes `.session-active` with `mode: full`).
+  - **W - just work** -> do ONLY what's obligatory: confirm there is an active
+    sign-in and a selected environment. Run `pac org who`; if it shows no auth
+    or no environment, run just the sign-in + environment steps from
+    starting-flow (Phases 2-3) - nothing else (no skills pull, inventory, or
+    full sync). Then write `.session-active` with `mode: quick` and handle the
+    request. Pull/export a solution only if the task actually needs local source.
 
-## TOOL WARM-UP AND AUTOMATIC RECOVERY
+  If the first message clearly implies a path (e.g. "just tweak the canvas app I
+  have open" -> W), pick it and say which, but still confirm sign-in + env.
 
-The mandatory tool calls above (read two files + git pull) serve as the
-warm-up. If any fail, read one additional file (`scripts/pac-workflows.ps1`)
-and retry once.
+Routing is invisible - never tell the user to switch agents or modes.
 
-If the retry ALSO fails, output this message and stop:
+## Guardrails
+
+- Canvas authoring is browser-based. There is NO Power Apps desktop app - never
+  tell the user they need one. Live coauthoring simply attaches to an open Power
+  Apps Studio browser tab that has coauthoring turned on.
+- Use the `canvas-authoring` MCP tools for live edits; use pac for the offline
+  flow. Non-canvas components are offline only.
+
+## VS Code tool error message
+
+If tool warm-up fails twice, show this and stop, then wait for the user:
 
 ---
 **VS Code tool error detected.**
@@ -656,34 +729,6 @@ bugs that break Copilot agent tools.
   open a new chat, and try again.
 ---
 
-Do NOT attempt any more tool calls after this. Wait for the user to act.
-
----
-
-## ROUTING
-
-After the mandatory tool calls complete, route based on session state:
-
-**IF `.session-active` does NOT exist (no environment confirmed yet):**
-Read `.github/agent-docs/starting-flow.md` and follow it from Phase 0.
-
-**IF `.session-active` EXISTS (environment already confirmed):**
-Read `.github/agent-docs/working-flow-reference.md` and follow it to handle the
-user's request.
-
-Never ask the user to switch agents or do anything manually. Routing is
-invisible to them.
-
----
-
-## REMINDER - DID YOU RUN THE STARTING FLOW?
-
-If no environment has been confirmed in this conversation and `.session-active`
-does not exist, STOP and go back to the Starting Flow immediately.
-This reminder exists because LLMs have a tendency to skip initialization
-protocols when the user's message contains a direct question or task.
-Do NOT answer. Set up first. Always.
-
 '@ | Set-Content -Path $agentPath -Encoding UTF8
     Write-Host "  $(if ($updateMode) {'Updated'} else {'Created'}) .github/agents/power-platform-master-agent.agent.md"
 } else {
@@ -694,191 +739,172 @@ Do NOT answer. Set up first. Always.
 $startingFlowPath = "$rootPath\.github\agent-docs\starting-flow.md"
 if ($updateMode -or -not (Test-Path $startingFlowPath)) {
     @'
-# Starting Flow - Power Platform Master Agent
+# Setup Flow - Power Platform Master Agent
 
-Run this on the first message of every session. NO EXCEPTIONS.
+Run this the first time each session, before working on the user's task. Goal:
+get them signed in, pointed at an environment, and fully set up (including live
+canvas authoring) - in a friendly, step-by-step way. Keep each step short and
+conversational: say what you're doing, do it, confirm, move on. Don't dump it
+all at once.
 
----
-
-## Phase 0 - Classify the user's message
-
-By this point you have already executed the three mandatory tool calls
-(read copilot-instructions.md, read AGENTS.md, git pull skills).
-Now classify the user's opening message:
-
-- **GREETING** = a casual hello, hi, good morning, hey, or similar
-  with no specific question or task embedded.
-- **QUESTION / TASK** = an actual question, request, or instruction
-  (e.g. "pull my solution", "what environments do I have?",
-  "add a field to the Contact form", etc.).
-
-**Save the classification and the original message** - you will need them in Phase 6.
-
-**Now respond based on the classification:**
-
-If **QUESTION / TASK**, say:
-"Great question! I need to activate your Power Platform environment first
-before I can help with that. Give me a moment to set everything up, and
-then I will come right back to your request."
-
-If **GREETING**, greet the user back warmly (match their tone) then say:
-"Let me get your Power Platform environment ready so we can start working."
-
-Then proceed immediately to Phase 1. Do NOT wait for the user to reply.
+You have already read copilot-instructions.md + AGENTS.md and pulled the skills
+repo (the agent's first-turn warm-up).
 
 ---
 
-## Phase 1 - Skill check & update
+## Phase 0 - Read the room
 
-The mandatory git pull already ran. Check its result:
+Look at the user's opening message and remember it (you return to it at the end):
 
-If the pull succeeded, say:
-"Power Platform skills updated to latest."
-Then list the available plugins by running:
-  ls power-platform-skills/plugins/
-Report what you find (e.g. "Available plugins: power-pages, model-apps, code-apps, canvas-apps, mcp-apps.").
+- **GREETING** (hi / hello / hey, no specific task) -> greet back warmly in their
+  tone, then: "Let me get you set up first - it'll only take a moment."
+- **TASK / QUESTION** (an actual request) -> "Love it. Let me get you set up
+  first so I can do that properly, then I'll jump right on it."
 
-If the pull failed (e.g. network issue), warn the user but continue:
-"Could not update power-platform-skills (offline?). Using local copy."
-
-If the folder `power-platform-skills/` does not exist at all, clone it:
-  git clone https://github.com/microsoft/power-platform-skills.git power-platform-skills
-Then confirm as above. Proceed immediately to Phase 2.
+Proceed to Phase 1 immediately - don't wait for a reply.
 
 ---
 
-## Phase 2 - Authentication
+## Phase 1 - Latest skills
 
-Run: pac auth list
+The skills pull already ran on warm-up:
 
-**If an active profile exists**, say:
-"Found existing auth profile: [email from the output].
- I will use this for today's session. If you want a different account,
- just say 'switch account' at any time."
-Then proceed immediately to Phase 3.
+- Succeeded -> "Skills are up to date." Then list the plugins:
+  `ls power-platform-skills/plugins/`  and report them (e.g. "Available:
+  canvas-apps, model-apps, code-apps, power-pages, mcp-apps.").
+- Failed (offline) -> "Couldn't refresh skills - using the local copy."
+- Folder missing -> clone it:
+  `git clone https://github.com/microsoft/power-platform-skills.git power-platform-skills`
 
-**If no profile exists**, say:
-"I need to connect to your Power Platform tenant.
- What email address should I use?"
-Wait for the user to provide their email.
-Then run: pac auth create --deviceCode
-The device code flow will display a URL and a code.
-Say: "Please open [URL] in your browser and enter code [CODE] to sign in."
-Wait for authentication to complete.
-Confirm: "Authenticated as [email]."
-Proceed to Phase 3.
+The custom embedded skill `.github/skills/pbi-powerapps-integration/SKILL.md` is
+always present (committed) regardless of the clone's state.
+
+Move on to Phase 2.
 
 ---
 
-## Phase 3 - Environment selection
+## Phase 2 - Sign in
 
-Run: pac org list
+Run: `pac auth list`
 
-Present the results as a numbered list, for example:
+- **Active profile exists** -> "You're signed in as [email]. I'll use that -
+  just say 'switch account' anytime to change."
+- **No profile** -> "Let's get you signed in. What email should I use?" Wait for
+  it, then run `pac auth create --deviceCode`, show the URL + code
+  ("Open [URL] and enter code [CODE] to sign in."), and wait for them to finish.
+  Confirm "Signed in as [email]."
 
-"Here are the environments you have access to:
- [1] Contoso - DEV (org1abc.crm.dynamics.com)
- [2] Contoso - TEST (org2def.crm.dynamics.com)
- [3] Contoso - Default (org3ghi.crm.dynamics.com)
- Which environment do you want to work in today? Enter a number:"
-
-Wait for the user to pick a number.
-
-Extract the **environment URL** (e.g. `org1abc.crm.dynamics.com`) from the
-pac org list output for the chosen item.
-
-Run: pac org select --environment [environment-url]
-
-Confirm: "Connected to: [environment name]."
+Move on to Phase 3.
 
 ---
 
-## Phase 4 - Inventory the environment
+## Phase 3 - Pick an environment
 
-Run: pac solution list
+Run: `pac org list`. Present a numbered list, e.g.:
 
-Also attempt (for items that may exist outside solutions):
-  pac canvas list (if supported)
-  pac flow list (if supported)
+ "[1] Contoso - DEV (org1abc.crm.dynamics.com)
+  [2] Contoso - TEST (org2def.crm.dynamics.com)
+  Which environment do you want to work in? Enter a number:"
 
-Collect all results. Separate them into:
-  - Solutions (list name, version, managed/unmanaged)
+Wait for their pick, extract its environment URL, run
+`pac org select --environment [url]`, and confirm "Connected to [environment]."
+
+Move on to Phase 4.
+
+---
+
+## Phase 4 - Readiness check ("are we all set?")
+
+Quickly confirm the toolbox and tell the user what's available. Keep it to a
+line or two.
+
+1. **pac CLI** - already used in Phases 2-3, so it's working. (If `pac` errors,
+   tell them to re-run the workspace installer.)
+2. **Live canvas coauthoring readiness:**
+   - Check `dnx` is available (it ships with the .NET 10 SDK): run `dnx --version`,
+     or `dotnet --list-sdks` and look for a `10.x` line.
+   - Confirm `canvas-authoring` is registered in `.vscode/mcp.json`.
+   - **Both present** -> "Live canvas coauthoring is ready. (The MCP server
+     starts automatically the first time you use it - nothing to start by hand.)"
+   - **dnx / .NET 10 missing** -> "Heads up: live canvas coauthoring needs the
+     .NET 10 SDK, which isn't installed yet. Everything else works. To enable it
+     later, install .NET 10
+     (https://dotnet.microsoft.com/download/dotnet/10.0) or re-run the workspace
+     installer." Do NOT block - keep going.
+
+Move on to Phase 5.
+
+---
+
+## Phase 5 - Inventory the environment
+
+Run: `pac solution list`. Also try (skip silently if unsupported):
+  `pac canvas list`, `pac flow list`
+
+Group results into:
+  - Solutions (name, version, managed/unmanaged)
   - Loose items not in any solution (canvas apps, flows, etc.)
 
-If a pac command returns an error or is unsupported, skip it silently and
-note at the end: "Note: [item type] listing not fully supported by pac CLI
-- you may have additional items in the portal."
+Present a clear inventory. If a command is unsupported, note briefly:
+"Note: [item type] listing isn't fully supported by pac CLI - you may have more
+in the portal."
 
-Present the full inventory clearly:
-"Here is what I found in [environment name]:
-
- SOLUTIONS:
- - [Solution Name] - v[version] - [managed/unmanaged]
- - ...
-
- ITEMS OUTSIDE SOLUTIONS (if any):
- - [item name] - [type]
- - ..."
+Move on to Phase 6.
 
 ---
 
-## Phase 5 - Local folder check and sync
+## Phase 6 - Sync the local folder
 
-Check if the folder `[EnvironmentName]/` exists locally (at workspace root).
+Check if `[EnvironmentName]/` exists locally (at workspace root).
 
-**IF THE FOLDER DOES NOT EXIST:**
-Say: "No local folder found for this environment. Creating it and pulling
+**If it does NOT exist:**
+Say: "No local folder for this environment yet - creating it and pulling
 everything down now..."
-Create `[EnvironmentName]/`
-For each solution found: run
+Create `[EnvironmentName]/`, and for each solution:
   pac solution export --name [SolutionName] --path ./exports/[SolutionName].zip
   pac solution unpack --zipfile ./exports/[SolutionName].zip --folder ./[EnvironmentName]/[SolutionName]
 Commit: "chore: initial pull [EnvironmentName]"
 
-**IF THE FOLDER ALREADY EXISTS:**
-Say: "Local folder found for [EnvironmentName]. Checking for differences..."
-For each solution online, compare against what exists locally in
-`[EnvironmentName]/[SolutionName]/`.
-If a solution exists online but NOT locally: pull it automatically.
-If a solution exists BOTH online and locally: present a conflict question:
-
-"Solution [SolutionName] exists both online and in your local folder.
- Which version do you want to keep?
- [1] Keep my local version (do not overwrite)
- [2] Pull from platform and overwrite local
- Your choice:"
-
-Wait for their answer before proceeding to the next item.
-After all conflicts are resolved, execute the chosen pulls and commit:
+**If it already exists:**
+Say: "Found a local folder for [EnvironmentName]. Checking for differences..."
+For each online solution, compare with `[EnvironmentName]/[SolutionName]/`:
+- Online but NOT local -> pull it automatically.
+- In BOTH -> ask:
+  "Solution [SolutionName] exists online and locally. Which to keep?
+   [1] Keep my local version  [2] Pull and overwrite local"
+  Wait for the answer before moving to the next.
+After resolving, run the chosen pulls and commit:
 "chore: sync [EnvironmentName] - resolved [n] conflicts"
+
+Move on to Phase 7.
 
 ---
 
-## Phase 6 - Handoff to Working Flow
+## Phase 7 - All set -> over to work
 
-**Create the session marker file** `.session-active` at the workspace root with:
+Create the session marker `.session-active` at the workspace root with:
 ```
 environment: [environment name]
 authenticated: true
 synced: [number of solutions]
+mode: full
+live_authoring: [ready | needs-dotnet-10]
 ```
 
-Present the session summary:
-"Environment ready! Here is your session summary:
- - Connected to: [environment]
+Give a short, friendly summary:
+"You're all set!
+ - Signed in: [email]
+ - Environment: [environment]
  - Solutions synced: [n]
- - Local folder: [EnvironmentName]/"
+ - Live canvas coauthoring: [ready / needs .NET 10]"
 
-**Now recall the classification from Phase 0:**
+Then return to the Phase 0 message:
 
-If the user's first message was a **QUESTION / TASK**, say:
-"All set! Now let me get back to your question..."
-Then read `.github/agent-docs/working-flow-reference.md` and immediately answer
-or act on the original question/task. Do NOT ask them to repeat it.
-
-If the user's first message was a **GREETING**, say:
-"Everything is ready! What can I help you with?"
-Then wait for the user's next message.
+- **It was a TASK / QUESTION** -> "Now, back to what you asked..." then read
+  `.github/agent-docs/working-flow-reference.md` and do it. Don't make them repeat it.
+- **It was a GREETING** -> "So - what would you like to do? I can pull or push
+  solutions, edit a component offline (any type), or live-coauthor a canvas app
+  you've got open in Studio." Then wait.
 
 '@ | Set-Content -Path $startingFlowPath -Encoding UTF8
     Write-Host "  $(if ($updateMode) {'Updated'} else {'Created'}) .github/agent-docs/starting-flow.md"
@@ -899,9 +925,23 @@ This file is read by the agent after the Starting Flow has completed and
 
 ## Skill Discovery - ALWAYS Dynamic
 
-All skills live under `power-platform-skills/plugins/`. The skills evolve
-frequently. **NEVER assume you know what skills exist.** Always discover
+Two skill sources. **NEVER assume you know what skills exist.** Always discover
 dynamically.
+
+**A. Custom embedded skills (committed, maintainer house style)** under
+`.github/skills/<name>/SKILL.md`. These are first-hand, maintainer-authored and
+take **precedence** over cloned skills where they overlap. Check them first:
+
+- `.github/skills/pbi-powerapps-integration/SKILL.md` - canvas apps embedded in
+  a Power BI report via the Power Apps visual (`PowerBIIntegration.Data` /
+  `.Refresh()`, the "re-edit from the Power BI Service" golden rule, the
+  1000-row cap, and a stale-schema troubleshooting playbook). Read it whenever
+  the app uses `PowerBIIntegration`, is launched with `source=PowerBIIntegration`,
+  or the user mentions the Power Apps visual / Power BI integration / columns
+  from the visual's field well.
+
+**B. Microsoft cloned skills** under `power-platform-skills/plugins/`. These
+evolve frequently.
 
 **Before performing any skill-based task:**
 
@@ -947,69 +987,123 @@ handles it, list all plugin `skills/` directories to find the right match.
 - **Require explicit "yes" confirmation for Production environments**
 - Commit: "feat: push [solution] to [env]"
 
-### EDIT using skills
-- Identify the correct plugin for the component type
-- Discover available skills dynamically (see Skill Discovery above)
-- Read the SKILL.md, follow its instructions step by step
-- After any edit, always run git diff and summarise what changed
-- Ask for confirmation before packing or pushing
+### EDIT a component
 
-#### Two ways to edit a CANVAS app
+Two editing modes, both first-class. Pick by component type and what the user wants.
 
-There are two distinct editing flows. Pick based on what the user wants and
-what is available. Canvas apps are the ONLY component type that supports the
-live flow today.
+**Offline authoring - works for EVERY component** (canvas apps, Power Automate
+flows, model-driven forms/views/sitemap, code apps, pages, ...):
+1. Pull the solution (export -> unpack) so the source is local.
+2. Identify the right skills plugin and discover its skills dynamically (see
+   Skill Discovery above); read the SKILL.md and follow it step by step.
+3. Edit the unpacked source, then run git diff and summarise what changed.
+4. Pack and import to apply (ask first). Changes show up in the platform after
+   import + a refresh.
 
-**A) OFFLINE editing (default - works for every component type)**
-- Pull the solution (export -> unpack) so the source is local
-- Edit the unpacked PA YAML / source files, following the canvas-apps SKILL.md
-- Show a git diff, then pack and import to apply the changes
-- Changes appear in Power Apps Studio only after import + a refresh
-- No extra prerequisites beyond the pac CLI
+**Live coauthoring - canvas apps ONLY** (real-time; no pack/import): drives an
+OPEN Power Apps Studio browser tab through the `canvas-authoring` MCP tools - see
+"Live canvas coauthoring" below.
 
-**B) LIVE editing (canvas apps only - real-time coauthoring via MCP)**
-This drives an OPEN Power Apps Studio session in real time using the
-`canvas-authoring` MCP server (registered in `.vscode/mcp.json`).
+Rule of thumb: non-canvas components -> offline only. Canvas apps -> offer either
+(quick tweaks shine live; larger or source-controlled changes shine offline).
+Canvas authoring is browser-based - there is NO desktop app; never say otherwise.
 
-Prerequisites - verify before starting:
-- `.NET 10 SDK` is installed (`dotnet --list-sdks` shows a `10.x` line).
-  It provides `dnx`, which launches the MCP server. If it is missing, tell
-  the user to install it (https://dotnet.microsoft.com/download/dotnet/10.0)
-  or re-run the workspace installer, then fall back to OFFLINE editing.
-- The MCP server `canvas-authoring` is present in `.vscode/mcp.json` (the
-  installer adds it). VS Code starts it on demand.
+#### Live canvas coauthoring (step by step)
 
-Step-by-step (guide the user through this - it is not all automatic):
-1. Open the target app in **Power Apps Studio** (make.powerapps.com) in
-   **edit** mode, in a browser.
-2. In Studio, enable coauthoring: **Settings -> Updates -> Coauthoring**,
-   toggle it ON, and save/reopen the app if prompted. Live editing does
-   NOT work unless coauthoring is enabled for that app.
-3. **Keep that browser tab OPEN for the whole session.** Closing it ends
-   coauthoring and breaks compile_canvas / sync_canvas.
-4. Copy the full Studio URL from the address bar (it looks like
+Real-time editing of an OPEN Power Apps Studio session via the `canvas-authoring`
+MCP server (registered in `.vscode/mcp.json`, launched on demand via `dnx`).
+
+Prerequisites - confirm before starting:
+- `.NET 10 SDK` installed (`dnx --version`, or `dotnet --list-sdks` shows a
+  `10.x` line) - it provides `dnx`. If missing, tell the user to install it
+  (https://dotnet.microsoft.com/download/dotnet/10.0) or re-run the installer,
+  then fall back to offline.
+- `canvas-authoring` present in `.vscode/mcp.json` (installer adds it). VS Code
+  starts the server automatically the first time a canvas-authoring tool runs.
+
+Steps (guide the user - it is not all automatic):
+1. Open the app in **Power Apps Studio** (make.powerapps.com) in **edit** mode, in a browser.
+2. Enable coauthoring: **Settings -> Updates -> Coauthoring** -> ON (save/reopen
+   if prompted). Live editing does NOT work unless coauthoring is on for that app.
+3. **Keep that tab OPEN the whole session** - closing it ends coauthoring and
+   breaks compile_canvas / sync_canvas.
+4. Copy the full Studio URL (e.g.
    https://make.powerapps.com/e/<env>/canvas/?action=edit&app-id=...).
-5. In Copilot Chat (this agent), say e.g. "connect live canvas authoring"
-   and paste the Studio URL.
-6. The agent extracts the connection parameters from the URL and calls the
-   MCP connect tool:
-   - environment_id = the segment between /e/ and the next /
-   - app_id = URL-decode the app-id value, take the last / segment
-   - cluster_category = from the host: make.powerapps.com -> prod,
+5. Tell the agent e.g. "connect live canvas authoring" and paste the URL.
+6. The agent calls the MCP `connect` tool FIRST - it "must be called before any
+   other tool". Extract the three params from the URL:
+   - environment_id = the segment between /e/ and the next / (a bare GUID)
+   - app_id = **URL-decode** the app-id value, then take the **last `/` segment**
+     -> a bare GUID. The raw `%2Fproviders%2F...%2Fapps%2F<GUID>` value will NOT
+     work - decode it down to just `<GUID>` first. (This wrong-app_id mistake is
+     the most common reason connect silently fails.)
+   - cluster_category = from the host: make.powerapps.com /
      make.preview.powerapps.com -> prod, make.gov.powerapps.us -> gov,
      make.high.powerapps.us -> high, make.apps.appsplatform.us -> dod,
      make.powerapps.cn -> china, anything else -> test
-   (Do not prompt for optional params like auth_flow / login_hint unless
-   sign-in needs them.)
-7. Once connected, make edits by asking in natural language. The agent uses
-   the MCP tools (list_controls, describe_control, compile_canvas,
-   sync_canvas, list_data_sources, etc.) to apply and validate changes,
-   which appear in the open Studio tab in near real time.
-8. To stop, just close the Studio tab. There is nothing to pack/import -
-   live changes are already in the app.
+   Omit optional params (auth_flow / login_hint) unless sign-in actually fails or
+   the user needs a different account - if already signed in, connect is silent
+   (no prompt). **Confirm `connect` returns "Successfully connected for app: ..."
+   before calling ANY other tool.**
+7. **The live read -> edit -> commit loop (VERIFIED end-to-end):**
+   a. `sync_canvas { directoryPath: <dir> }` - pulls every screen/control/formula
+      from the live session into `<dir>` as `.pa.yaml` (App.pa.yaml + one
+      `Screen_*.pa.yaml` per screen). This is the ONLY way to read the real
+      control formulas. (`list_controls` / `describe_control` only describe control
+      *types* - the catalog of buttons/labels/galleries - NOT your app's instances.)
+   b. Edit the `.pa.yaml` files on disk. To ADD a control, append a list item under
+      the target screen's `Children:` block, matching the existing indentation
+      (screen `Children:` at 4 spaces, each `- ControlName:` at 6 spaces). Example -
+      a square box named `test`:
 
-When unsure which flow to use, or if any live-flow prerequisite is missing,
-use OFFLINE editing.
+          Children:
+            - test:
+                Control: Rectangle
+                Properties:
+                  Fill: =RGBA(255, 0, 0, 1)
+                  Height: =100
+                  Width: =100
+                  X: =700
+                  Y: =50
+
+      Property values are Power Fx and MUST start with `=`. To EDIT a control,
+      change the relevant `Properties:` lines in place.
+   c. `compile_canvas { directoryPath: <dir> }` - this is the COMMIT. Despite its
+      name and its "Validates" description, when a live session is connected
+      `compile_canvas` **uploads your local YAML to the authoring session and
+      persists the change to the app** - the edit then shows in the open Studio
+      tab. This is the write-back mechanism; there is no separate save/push tool.
+   d. (Optional) `sync_canvas` again into a *fresh* directory to confirm the server
+      now returns your change.
+
+   **CRITICAL - do not be fooled by "Validation FAILED":** On Power BI-embedded apps
+   `compile_canvas` reports hundreds of `PowerBIIntegration` / `Distinct` / `First`
+   errors (e.g. "453 errors"). These are FALSE POSITIVES - the App-level
+   `PowerBIIntegration` host control is not part of the synced source, so any formula
+   referencing `[@PowerBIIntegration].Data` looks unresolved in isolation. **The
+   commit still succeeds and your change is still applied even when validation
+   "FAILED" with these errors.** Do NOT report failure or abort on them; only real
+   errors on the control(s) YOU just touched matter. (More detail in the
+   `pbi-powerapps-integration` skill.)
+8. To stop, just close the Studio tab. Nothing to pack/import - changes are already live.
+
+**The tool set is DYNAMIC - this is the #1 source of confusion, do not get fooled:**
+- BEFORE a successful `connect`, only the base tools exist: `connect`,
+  `sync_canvas`, `compile_canvas`, `list_controls`, `describe_control`,
+  `list_data_sources`, `get_data_source_schema`, `list_apis`, `describe_api`.
+- AFTER `connect` succeeds, the server registers MORE tools based on the backend
+  version (e.g. app checker / accessibility checks). So if a checker tool "isn't
+  there", you simply have not connected yet - connect first, then re-check.
+- If ANY tool reports blocked / unavailable / empty / "no session", that almost
+  always means **there is no live session** (connect was never done, used a still-
+  encoded or wrong app_id, or the Studio tab closed and the session dropped) - NOT
+  that the tool is disabled or the capability is missing. Re-run `connect` and
+  retry. **Never tell the user a capability "does not exist" or "is blocked"
+  without first confirming a live session ("Successfully connected") and that you
+  passed a decoded GUID app_id.**
+- A Power BI-embedded app (`source=PowerBIIntegration&is-hosted=true`) connects
+  fine for reading - it does NOT block `connect`. For its field-well / stale-schema
+  quirks, read the `.github/skills/pbi-powerapps-integration/SKILL.md` skill.
 
 ### COMPARE environments
 - Pull the same solution from two different environments
@@ -1042,6 +1136,279 @@ use OFFLINE editing.
     Write-Host "  $(if ($updateMode) {'Updated'} else {'Created'}) .github/agent-docs/working-flow-reference.md"
 } else {
     Write-Host "  Exists: .github/agent-docs/working-flow-reference.md" -ForegroundColor DarkGray
+}
+
+# -- .github/hooks/clear-session.json (reset setup each new session) ----
+# A SessionStart hook deletes the .session-active marker at the start of every
+# new chat session, so the agent re-offers setup (full or quick) each time
+# instead of treating a stale marker as "already set up". Fires for any agent in
+# this workspace. Cross-platform: 'rm' on posix; on Windows the value is run by
+# PowerShell, so we use Remove-Item (idempotent, never throws on a missing file
+# and contains no '&', which PowerShell rejects as an unquoted operator).
+$hookPath = "$rootPath\.github\hooks\clear-session.json"
+if ($updateMode -or -not (Test-Path $hookPath)) {
+    @'
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "rm -f .session-active",
+        "windows": "powershell -NoProfile -Command \"Remove-Item -Force -ErrorAction SilentlyContinue .session-active; exit 0\""
+      }
+    ]
+  }
+}
+'@ | Set-Content -Path $hookPath -Encoding UTF8
+    Write-Host "  $(if ($updateMode) {'Updated'} else {'Created'}) .github/hooks/clear-session.json"
+} else {
+    Write-Host "  Exists: .github/hooks/clear-session.json" -ForegroundColor DarkGray
+}
+
+# -- .github/skills/pbi-powerapps-integration/SKILL.md -----------------
+# Custom, maintainer-authored skill (committed - NOT gitignored). Embedded here
+# so it is (re)installed and kept current on every run, layering first-hand
+# Power BI <-> Power Apps integration knowledge on top of the cloned Microsoft
+# canvas-apps skills. This here-string is the source of truth: edit it and
+# re-run, or edit the file directly - its on-disk mtime is the freshness signal.
+$pbiPaSkillPath = "$rootPath\.github\skills\pbi-powerapps-integration\SKILL.md"
+if ($updateMode -or -not (Test-Path $pbiPaSkillPath)) {
+    @'
+---
+name: pbi-powerapps-integration
+description: "Use when: building, editing, or debugging a canvas app embedded in a Power BI report via the Power Apps visual (the PowerBIIntegration object). Covers the field-well -> schema hand-off, the golden rule that field changes must be re-edited from the Power BI SERVICE, the PowerBIIntegration.Data / .Refresh() API surface, platform limitations, and a troubleshooting playbook for stale-schema errors."
+---
+
+# Power BI <-> Power Apps Integration Skill
+
+## Provenance and maintenance
+
+- **Authored from**: a real production incident in this workspace (a Power BI-embedded
+  canvas app whose `PowerBIIntegration.Data` showed stale columns after the report's
+  field well was changed in Desktop) plus the official Microsoft documentation
+  ([Power Apps visual for Power BI](https://learn.microsoft.com/en-us/power-apps/maker/canvas-apps/powerapps-custom-visual)).
+- **Independent / house style**: written first-hand from the incident and Microsoft
+  Learn; not copied or AI-rewritten from any GPL-licensed source.
+- **Updating**: edit the PS1 installer (source of truth) and re-run it, or edit this
+  file directly. The agent does NOT auto-modify it (it is maintainer house style).
+- **Freshness**: this file's on-disk modification time reflects the last update.
+
+---
+
+## When to use
+
+- A canvas app is opened from / embedded in a Power BI report (URL contains
+  `source=PowerBIIntegration`, `is-hosted=true`, or the app uses the `PowerBIIntegration`
+  object / `PowerBI` control).
+- The user mentions: "Power Apps visual", "Power BI integration", "PowerBIIntegration",
+  fields/columns "from the visual's well", or formulas that reference report data.
+- Symptoms: new columns added in Power BI don't appear in the app; IntelliSense shows an
+  old set of columns; formulas referencing a recently-added field throw errors; data
+  isn't passing into the app while editing.
+
+---
+
+## Core mental model (read this first)
+
+The **Power Apps visual** in a Power BI report has a **"Power Apps Data" field well**.
+Whatever columns sit in that well are pushed into the canvas app as the **read-only
+`PowerBIIntegration.Data`** table (it behaves like any other read-only data source /
+collection).
+
+The single most important fact:
+
+> **The canvas app SNAPSHOTS the field-well schema at the moment Power Apps Studio is
+> launched from the visual. It does NOT live-refresh that schema when you later change
+> the well.** Change the well while Studio is open (or relaunch from the wrong place) and
+> the app keeps advertising the OLD columns -> IntelliSense is stale and any formula
+> touching a new column errors.
+
+A clean reload of the app against the *current* well compiles fine. So "old columns" is
+almost always a **stale Studio session**, not a broken app.
+
+---
+
+## THE GOLDEN RULE (the #1 cause of "old columns")
+
+Microsoft, verbatim:
+
+> *"If you change the data fields associated with the visual, you must edit the app from
+> within the Power BI **service** by selecting the ellipsis (...) and then selecting
+> **Edit**. Otherwise, the changes won't be propagated to Power Apps, and the app will
+> behave in unexpected ways."*
+
+Practical rules that follow:
+
+1. **Any time you add / remove / rename a column in the visual's field well, you MUST
+   re-launch Power Apps Studio for the app to pick up the new schema.** Refreshing the
+   Studio browser tab/URL is **not** enough - the schema only re-injects on a *fresh
+   launch from the visual*.
+2. **Re-launch from the Power BI SERVICE (web), not Desktop**, for field-well changes:
+   report (edit mode) -> select the Power Apps visual -> **More options (...)** ->
+   **Edit**. Editing from Desktop after a field change will **not** propagate reliably.
+3. **Desktop provides data when CREATING an app but not while EDITING.** Use **Power BI
+   web** to preview live data while editing. (Per docs: *"Power Apps in Power BI Desktop
+   provides data to Power Apps Studio when creating apps but not while editing. Use Power
+   BI Web to preview the data while editing apps."*)
+4. **Publish the report to the Service first**, then create/modify the app. Microsoft's
+   recommendation: *"first publish your report to the Power BI service and then create or
+   modify apps."*
+5. The launch point and the report you changed **must be the same report**. Columns added
+   in Desktop won't help if you relaunch Studio from an older, not-yet-republished Service
+   report (and vice-versa). **Publish, then relaunch from Service.**
+
+---
+
+## Troubleshooting playbook - "my new columns don't show / formulas error"
+
+Run these in order; stop when fixed.
+
+1. **Confirm the well.** In the report, select the Power Apps visual and verify ALL the
+   intended columns are in the **"Power Apps Data" field well**.
+2. **Publish.** Save (Desktop) and **publish to the Power BI Service**. The Service copy
+   is what hands the schema to the app.
+3. **Fully close** the current Power Apps Studio tab. (Do not just refresh.)
+4. **Relaunch from Service:** open the report in the **Power BI Service**, edit mode ->
+   Power Apps visual -> **... -> Edit**. `PowerBIIntegration.Data` now exposes the new
+   columns; IntelliSense and formulas resolve.
+5. **Still stale? Re-seat the fields (known fallback).** Power BI sometimes caches the
+   field-to-app mapping on the visual itself:
+   - Remove **all** fields from the "Power Apps Data" well.
+   - Re-add **all** the columns fresh.
+   - Save/publish, then relaunch Studio from the Service visual.
+6. **Verify in Studio.** Type `PowerBIIntegration.Data.` and confirm IntelliSense lists
+   every expected column. Run App Checker - it should be clean once the schema matches.
+
+### Live-coauthoring / MCP note (this workspace)
+When connected via the `canvas-authoring` MCP tools, a fresh `connect` loads the app
+against the current schema. If `get_appchecker_errors` returns **0 issues** but the user
+still sees old columns, that **confirms** the problem is the user's stale browser tab, not
+the app source - the fix is to **relaunch their Studio tab from the Service visual**, not
+a YAML edit.
+
+**Editing a PBI-embedded app live (verified loop):** `sync_canvas` -> edit `.pa.yaml` ->
+`compile_canvas` commits the change to the live session (it is the write-back, not just a
+validator). `compile_canvas` will report hundreds of `PowerBIIntegration` / `Distinct` /
+`First` errors (e.g. "453 errors, Validation FAILED") because the App-level
+`PowerBIIntegration` host control is NOT in the synced source, so those formulas look
+unresolved in isolation. **These are false positives and the commit still applies.** Do
+not abort or report failure on them - only errors on the control(s) you actually edited
+count.
+
+**The "integration disappears while authoring" pattern (undocumented - learned the hard
+way):** The moment you author live over MCP, the `PowerBIIntegration` node **drops out of
+the Studio left Tree-view pane** and every formula that references the report's field-well
+columns (`PowerBIIntegration.Data`, `First([@PowerBIIntegration].Data).<Col>`, etc.) turns
+**red with "name isn't recognized"** errors. This is because the MCP coauthoring source
+does not include the App-level `PowerBIIntegration` host - the Power BI visual injects it
+only at launch. What to do:
+- **Do NOT "fix" the red by deleting or rewriting those references.** They are correct;
+  the host is just temporarily detached. Removing them would actually break the app.
+- **Keep authoring with the real column names** exactly as they appear in the field well.
+  Write your new logic referencing `PowerBIIntegration.Data` / the well columns as normal
+  and `compile_canvas`-commit it despite the red.
+- **If you don't know the exact column names** the logic needs, you cannot introspect the
+  well while the host is detached - **ask the user which field-well column names to
+  reference**, then use those verbatim.
+- **The red clears itself on re-launch.** Once the user re-connects / relaunches the app
+  from the **Power BI Service visual** (... -> Edit), the `PowerBIIntegration` host is
+  re-injected, the node returns to the tree, and all those references resolve - your
+  committed logic now works. So the correct hand-off is: *"I've applied the change; the
+  PowerBIIntegration errors you see are expected during live authoring - reopen the app
+  from the Power BI Service and they'll resolve."*
+
+---
+
+## `PowerBIIntegration` API surface
+
+| Member | What it is | Notes |
+|--------|-----------|-------|
+| `PowerBIIntegration.Data` | Read-only table of the rows passed from the report's field well | Behaves like a data source / collection. Use `First()`, `LookUp()`, `Filter()`, `Gallery.Items`, etc. **Read-only** - you cannot write back to it. |
+| `PowerBIIntegration.Refresh()` | Triggers a refresh of the underlying Power BI data | **Only available if the app was CREATED from the Power Apps visual** AND the data source supports / uses **DirectQuery**. Not available in apps merely associated later, nor on import-mode models. Cannot trigger refresh from Power BI **Desktop**. |
+
+### Example formulas
+```powerfx
+// First row of the report data
+First(PowerBIIntegration.Data).Customer_Name
+
+// Join Power BI data with a Dataverse/other source
+LookUp(Customer, Customer_x0020_Name = First(PowerBIIntegration.Data).Customer_Name)
+
+// Bind a gallery to the report rows
+Gallery1.Items = PowerBIIntegration.Data
+
+// Refresh the report data (only for apps created from the visual on a DirectQuery source)
+PowerBIIntegration.Refresh()
+```
+
+> **Column name encoding:** spaces and special characters in Power BI column names are
+> escaped in Power Fx (e.g. a space becomes `_x0020_`). After adding columns, confirm the
+> exact escaped name via IntelliSense rather than guessing.
+
+---
+
+## Hard limitations (design within these)
+
+- **1,000-row cap.** A maximum of **1000 records** can be passed from Power BI into the
+  app via `PowerBIIntegration`. Pre-aggregate/filter in the report for larger datasets.
+- **No filtering / write-back to the report.** The Power Apps visual **cannot filter the
+  report or send data back** to it. Writing back to the same source as the report won't
+  reflect immediately in Desktop - only on the next scheduled refresh.
+- **Field changes require Service re-edit** (the Golden Rule above).
+- **Desktop = data only on create, not on edit.** Preview live data on Power BI **web**.
+- **`Refresh()` constraints.** App must be created from the visual AND use DirectQuery.
+- **Embedding scope.** Supported only for **"Embed for your organization"** - *not*
+  "Embed for your customers". No **multi-level embedding** on sovereign clouds (e.g.
+  report-in-SharePoint-in-Teams).
+- **Guest users** are supported only when the app URI carries the tenantId, the Power BI
+  portal authenticates the user (no anonymous access), and the app is shared with them.
+- **Sharing is separate.** The app must be **shared with report users independently** of
+  sharing the report.
+- **Power BI Report Server is not supported.**
+- **Power BI mobile app** doesn't support the **microphone** control in Power Apps visuals.
+- **`Launch()`** in the visual supports **https only**.
+
+---
+
+## Browser support
+
+| Browser | View | Create | Modify |
+|---------|:----:|:------:|:------:|
+| Microsoft Edge | yes | yes | yes |
+| Google Chrome | yes | yes | yes |
+| Safari | yes | - | - | *(must clear "Prevent cross-site tracking" in Privacy)* |
+| Firefox / others | - | - | - |
+
+Use **Edge or Chrome** for any create/modify work.
+
+---
+
+## Quick checklist (paste-ready)
+
+When a user reports Power BI integration trouble, walk this list:
+
+- [ ] Are the new columns actually in the visual's **"Power Apps Data" field well**?
+- [ ] Is the report **published to the Service** with those columns?
+- [ ] Did they **fully close** Studio (not just refresh)?
+- [ ] Did they **relaunch from the Service** visual via **... -> Edit** (not Desktop)?
+- [ ] If still stale: did they **remove + re-add all fields** and relaunch?
+- [ ] Are they on **Edge/Chrome**?
+- [ ] Is the dataset within the **1000-row** limit?
+- [ ] If they need `Refresh()`: was the app **created from the visual** on a **DirectQuery** source?
+
+---
+
+## Sources
+
+- Microsoft Learn - [Power Apps visual for Power BI](https://learn.microsoft.com/en-us/power-apps/maker/canvas-apps/powerapps-custom-visual)
+  (Using the visual, Limitations, Browser support).
+- Microsoft Learn - [Add a Power Apps visual to a report (tutorial)](https://learn.microsoft.com/en-us/power-bi/visuals/power-bi-visualization-powerapp).
+- First-hand workspace incident (stale `PowerBIIntegration.Data` schema, resolved by
+  re-editing the app from the Power BI Service).
+'@ | Set-Content -Path $pbiPaSkillPath -Encoding UTF8
+    Write-Host "  $(if ($updateMode) {'Updated'} else {'Created'}) .github/skills/pbi-powerapps-integration/SKILL.md"
+} else {
+    Write-Host "  Exists: .github/skills/pbi-powerapps-integration/SKILL.md" -ForegroundColor DarkGray
 }
 
 # -- .vscode/tasks.json (force terminal warm-up on folder open) --------

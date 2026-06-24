@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _Nothing yet — next changes will appear here._
 
+## [v0.2.1-pre-release] - 2026-06-24
+
+### Fixed
+
+- **Live canvas authoring was blocked by the agent's own tool allowlist** — the Canvas Authoring MCP server was registered in `.vscode/mcp.json`, but the agent's `tools:` allowlist did not include it, so the agent could not call it and would suggest a non-existent desktop workaround instead. Added `canvas-authoring/*` to the allowlist so the agent can actually coauthor live
+
+### Added
+
+- **Per-session setup reset via SessionStart hook** — the installer now generates `.github/hooks/clear-session.json`, a workspace `SessionStart` hook that clears the `.session-active` marker at the start of each new agent session, so the guided setup is offered once per session instead of only once after install
+- **`[S] set me up` / `[W] just work` startup choice** — on a fresh session the agent now asks whether to run the full guided setup or jump straight to work with a lightweight, lazy init (confirms sign-in and environment, prompts only if missing), reducing first-turn friction
+- **Power Platform Tools extension auto-install (optional)** — Step 2 now detects the Power Platform Tools VS Code extension and installs it via `code --install-extension` when absent (non-blocking); all six prerequisites now print an explicit green confirmation when present
+- **Custom embedded skill `pbi-powerapps-integration`** — the installer now writes a maintainer-authored, house-style skill to `.github/skills/pbi-powerapps-integration/SKILL.md` (committed, not gitignored) so it auto-installs and stays current on every run. It covers canvas apps embedded in Power BI via the Power Apps visual: the `PowerBIIntegration.Data` / `.Refresh()` API, the golden rule that field-well changes must be re-edited from the Power BI Service, the 1000-row limit, and a stale-schema troubleshooting playbook. The agent (copilot-instructions, starting flow, and working-flow skill discovery) now reads it first and treats it as authoritative over the cloned canvas-apps skills where they overlap
+
+### Changed
+
+- **Master Agent restructured into a cleaner session router** — consolidated redundant onboarding prose, clarified offline (every component) vs live (canvas apps only) editing paths, and added a live-authoring readiness check (`dnx` / .NET 10 SDK + the `canvas-authoring` MCP server) to the starting flow
+
 ## [v0.2.0-pre-release] - 2026-06-05
 
 ### Added

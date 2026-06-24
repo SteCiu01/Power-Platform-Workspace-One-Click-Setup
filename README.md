@@ -70,6 +70,7 @@ Copilot Chat panel, guided by Microsoft's official [power-platform-skills](https
 |---|---|
 | **Power Platform Master Agent** | A custom Copilot Chat agent that covers the full development lifecycle — auth, environment sync, solution management, **and agentic development**: build and edit canvas apps, flows, Copilot Studio topics, model-driven pages, and Dataverse schema through natural language |
 | **Microsoft Power Platform Skills** | Git-cloned from [microsoft/power-platform-skills](https://github.com/microsoft/power-platform-skills) — no npm install or admin rights required (see [FAQ](#faq)) |
+| **Custom embedded skill** | `pbi-powerapps-integration` — a maintainer-authored, house-style skill (committed in `.github/skills/`) for canvas apps embedded in Power BI via the Power Apps visual, written from a real production incident |
 | **PAC CLI Helper Script** | `scripts/pac-workflows.ps1` — pull, push, and init solutions with a single command |
 | **Git Version Control** | Repository initialised with a clean `.gitignore` and first commit out of the box |
 | **Organised Folder Structure** | `exports/`, `deploy/`, `scripts/`, `.github/agents/` — everything where it should be |
@@ -87,7 +88,7 @@ Before running the installer, make sure you have:
 | **Git** | Yes | [git-scm.com](https://git-scm.com) |
 | **PAC CLI** | Auto-installed | The installer installs it for you (via .NET tool or the standalone MSI) — no action needed |
 | **.NET 10 SDK** | Live authoring only | Needed **only** for the live canvas authoring flow (real-time coauthoring via MCP). The installer auto-installs it; if that fails, grab it from [dotnet.microsoft.com](https://dotnet.microsoft.com/download/dotnet/10.0). Offline editing works without it |
-| **[Power Platform Tools](https://marketplace.visualstudio.com/items?itemName=microsoft-IsvExpTools.powerplatform-vscode)** | Nice to have | Adds visual auth/environment panels, YAML language support, and auto-provides the PAC CLI. Not required — the agent works independently |
+| **[Power Platform Tools](https://marketplace.visualstudio.com/items?itemName=microsoft-IsvExpTools.powerplatform-vscode)** | Auto-installed (optional) | Adds visual auth/environment panels, YAML language support, and auto-provides the PAC CLI. The installer detects it and installs it via `code --install-extension` if missing — non-blocking, and the agent works without it |
 
 ---
 
@@ -118,7 +119,7 @@ Enter a name for your workspace folder (default: Power Platform): _
 
 Type a name or press **Enter** to accept the default. The script will:
 
-1. Check all prerequisites (git, VS Code, pac)
+1. Check all prerequisites (git, VS Code, GitHub Copilot, pac CLI, .NET 10 SDK, Power Platform Tools) — confirming each with a green check and auto-installing the ones it can
 2. Create the folder at `C:\Users\<you>\<folder name>\`
 3. Generate all config files (`.gitignore`, agent definition, Copilot instructions, helper scripts)
 4. Clone Microsoft's Power Platform Skills repository
@@ -207,6 +208,16 @@ The skills cover four areas today:
 | **power-pages** | Create and modify Power Pages code sites (React, Angular, Vue, or Astro) |
 
 For components not yet covered by a dedicated skill — **Power Automate flows** (JSON), **Copilot Studio topics** (YAML), and **Dataverse schema** (solution XML) — the agent reads and edits the unpacked source files directly and walks you through each change.
+
+#### Custom embedded skill — Power BI ↔ Power Apps integration
+
+Alongside Microsoft's cloned skills, this workspace ships one **custom, maintainer-authored skill** committed under `.github/skills/pbi-powerapps-integration/SKILL.md`:
+
+| Custom skill *(original to this repo)* | What it covers |
+|---|---|
+| **pbi-powerapps-integration** | Canvas apps embedded in a Power BI report via the Power Apps visual — the `PowerBIIntegration.Data` / `.Refresh()` API surface, the **golden rule** that field-well changes must be re-edited from the Power BI **Service**, the 1000-row limit, browser support, and a step-by-step **stale-schema troubleshooting playbook** (including a live-coauthoring/MCP note specific to this workspace) |
+
+Unlike the cloned Microsoft skills, this one is **committed in the repo** (not gitignored) so it survives re-installs and reaches everyone who runs the installer. The agent reads it first and treats it as authoritative where it overlaps with the cloned canvas-apps skills. It was written first-hand from a real production incident plus Microsoft Learn — not copied or AI-rewritten from any third-party source — and is the maintainer's to update (edit the installer here-string, or the file directly).
 
 > **Why git clone instead of npm install?** Corporate environments typically
 > block npm global installs and require admin approval. This workspace clones
