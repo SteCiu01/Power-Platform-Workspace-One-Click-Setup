@@ -89,6 +89,7 @@ Before running the installer, make sure you have:
 | **PAC CLI** | Auto-installed | The installer installs it for you (via .NET tool or the standalone MSI) — no action needed |
 | **.NET 10 SDK** | Live authoring only | Needed **only** for the live canvas authoring flow (real-time coauthoring via MCP). The installer auto-installs it; if that fails, grab it from [dotnet.microsoft.com](https://dotnet.microsoft.com/download/dotnet/10.0). Offline editing works without it |
 | **[Power Platform Tools](https://marketplace.visualstudio.com/items?itemName=microsoft-IsvExpTools.powerplatform-vscode)** | Auto-installed (optional) | Adds visual auth/environment panels, YAML language support, and auto-provides the PAC CLI. The installer detects it and installs it via `code --install-extension` if missing — non-blocking, and the agent works without it |
+| **Azure CLI (`az`)** | Optional — niche | Used **only** to auto-resolve live Power Apps `appId`s during the cross-environment **repoint** workflow (specific Power BI ↔ Power Apps tasks). The installer asks once and installs it via winget if you say yes (**default: skip**); otherwise grab it from [aka.ms/installazurecli](https://aka.ms/installazurecli). Everything else works without it |
 
 ---
 
@@ -215,7 +216,7 @@ Alongside Microsoft's cloned skills, this workspace ships one **custom, maintain
 
 | Custom skill *(original to this repo)* | What it covers |
 |---|---|
-| **pbi-powerapps-integration** | Canvas apps embedded in a Power BI report via the Power Apps visual — the `PowerBIIntegration.Data` / `.Refresh()` API surface, the **golden rule** that field-well changes must be re-edited from the Power BI **Service**, the 1000-row limit, browser support, and a step-by-step **stale-schema troubleshooting playbook** (including a live-coauthoring/MCP note specific to this workspace) |
+| **pbi-powerapps-integration** | Canvas apps embedded in a Power BI report via the Power Apps visual — the `PowerBIIntegration.Data` / `.Refresh()` API surface, the **golden rule** that field-well changes must be re-edited from the Power BI **Service**, the 1000-row limit, browser support, and a step-by-step **stale-schema troubleshooting playbook** (including a live-coauthoring/MCP note specific to this workspace) — plus an end-to-end **cross-environment repoint workflow** that hardcodes the correct `appId` / `EnvironmentId` into Power Apps & Flow visuals per DevOps branch (dev → stage → prod) |
 
 Unlike the cloned Microsoft skills, this one is **committed in the repo** (not gitignored) so it survives re-installs and reaches everyone who runs the installer. The agent reads it first and treats it as authoritative where it overlaps with the cloned canvas-apps skills. It was written first-hand from a real production incident plus Microsoft Learn — not copied or AI-rewritten from any third-party source — and is the maintainer's to update (edit the installer here-string, or the file directly).
 

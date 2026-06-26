@@ -416,6 +416,60 @@ if ($net10Root) {
     }
 }
 
+# -- Azure CLI (az) - OPTIONAL, opt-in (specific Power BI <-> Power Apps tasks) ----
+# 'az' is NOT required by the workspace. It is used only by the custom
+# pbi-powerapps-integration skill's cross-environment repoint workflow, to
+# auto-resolve a Power Apps visual's live appId from Dataverse (the canvasapps
+# table). Everything else - including the rest of that workflow - works without
+# it (the skill also offers maker-portal / sibling-report fallbacks). Because it
+# is so niche we do NOT auto-install it: we ask once (default: skip), try winget
+# if you accept, and otherwise point you at the manual installer.
+Write-Host ""
+Write-Host "  -- Azure CLI (optional, for Power BI <-> Power Apps repoint tasks) --" -ForegroundColor DarkGray
+
+function Test-AzCli {
+    # Resilient 'az' probe: a fresh winget MSI updates the registry PATH but not
+    # this running process, so refresh PATH from Machine+User and also probe the
+    # default install location before giving up.
+    if (Get-Command az -ErrorAction SilentlyContinue) { return $true }
+    try {
+        $machine = [System.Environment]::GetEnvironmentVariable('PATH', 'Machine')
+        $user    = [System.Environment]::GetEnvironmentVariable('PATH', 'User')
+        $env:PATH = (@($env:PATH, $machine, $user) | Where-Object { $_ }) -join ';'
+    } catch { }
+    if (Get-Command az -ErrorAction SilentlyContinue) { return $true }
+    $wbin = Join-Path ${env:ProgramFiles} 'Microsoft SDKs\Azure\CLI2\wbin'
+    if ((Test-Path $wbin) -and (Test-Path (Join-Path $wbin 'az.cmd'))) { Add-DirToPath $wbin; return $true }
+    return $false
+}
+
+$azLink = "https://aka.ms/installazurecli"
+if (Test-AzCli) {
+    Write-Host "  Azure CLI (az): detected" -ForegroundColor Green
+} else {
+    Write-Host "  Azure CLI (az) is optional - only used to auto-resolve Power Apps appIds during the" -ForegroundColor Gray
+    Write-Host "  Power BI <-> Power Apps repoint workflow (maker-portal / sibling-report fallbacks exist)." -ForegroundColor Gray
+    $azAns = Read-Host "  Install Azure CLI now? (y/N)"
+    if ($azAns -match '^\s*(y|yes)\s*$') {
+        if (Get-Command winget -ErrorAction SilentlyContinue) {
+            Write-Host "  Installing Azure CLI via winget (Microsoft.AzureCLI)..." -ForegroundColor DarkGray
+            try { & winget install --silent --accept-package-agreements --accept-source-agreements -e --id Microsoft.AzureCLI 2>$null | Out-Null } catch { }
+            if (Test-AzCli) {
+                Write-Host "  Azure CLI installed (open a new terminal if 'az' isn't found right away)." -ForegroundColor Green
+            } else {
+                Write-Host "  OK - Azure CLI wasn't installed automatically. If you later need the repoint" -ForegroundColor Yellow
+                Write-Host "       integration, install it from: $azLink" -ForegroundColor DarkGray
+            }
+        } else {
+            Write-Host "  OK - winget isn't available, so Azure CLI wasn't installed. If you later need the" -ForegroundColor Yellow
+            Write-Host "       repoint integration, install it from: $azLink" -ForegroundColor DarkGray
+        }
+    } else {
+        Write-Host "  Skipped. If you later need the Power BI <-> Power Apps repoint integration," -ForegroundColor DarkGray
+        Write-Host "  install Azure CLI from: $azLink" -ForegroundColor DarkGray
+    }
+}
+
 if ($missing.Count -gt 0) {
     Write-Host "`nMissing prerequisites:" -ForegroundColor Red
     $missing | ForEach-Object { Write-Host "  - $_" -ForegroundColor Red }
@@ -560,8 +614,9 @@ Two skill sources, read both:
    `.github/skills/<name>/SKILL.md`. Currently:
    `.github/skills/pbi-powerapps-integration/SKILL.md` - read it for any work on
    a canvas app embedded in a Power BI report (the `PowerBIIntegration` object,
-   stale-schema issues, field-well changes). It layers first-hand knowledge on
-   top of the cloned canvas-apps skills; the custom skill takes precedence where
+   stale-schema issues, field-well changes) or repointing Power Apps / Flow
+   visuals across DevOps branches (dev/stage/prod). It layers first-hand knowledge
+   on top of the cloned canvas-apps skills; the custom skill takes precedence where
    they overlap.
 
 ## Workspace conventions
@@ -938,7 +993,10 @@ take **precedence** over cloned skills where they overlap. Check them first:
   1000-row cap, and a stale-schema troubleshooting playbook). Read it whenever
   the app uses `PowerBIIntegration`, is launched with `source=PowerBIIntegration`,
   or the user mentions the Power Apps visual / Power BI integration / columns
-  from the visual's field well.
+  from the visual's field well. **Also read it for cross-environment repoint
+  tasks** - hardcoding the right `appId` / `EnvironmentId` into Power Apps / Flow
+  visuals per DevOps branch (dev/stage/prod): "repoint", "hardcode the prod ids",
+  "lock the app/flow ids per environment".
 
 **B. Microsoft cloned skills** under `power-platform-skills/plugins/`. These
 evolve frequently.
@@ -1176,14 +1234,14 @@ if ($updateMode -or -not (Test-Path $pbiPaSkillPath)) {
     @'
 ---
 name: pbi-powerapps-integration
-description: "Use when: building, editing, or debugging a canvas app embedded in a Power BI report via the Power Apps visual (the PowerBIIntegration object). Covers the field-well -> schema hand-off, the golden rule that field changes must be re-edited from the Power BI SERVICE, the PowerBIIntegration.Data / .Refresh() API surface, platform limitations, and a troubleshooting playbook for stale-schema errors."
+description: "Use when: building, editing, or debugging a canvas app embedded in a Power BI report via the Power Apps visual (the PowerBIIntegration object), OR repointing Power Apps / Power Automate visuals across DevOps branches (dev -> stage -> prod). Covers the field-well -> schema hand-off, the golden rule that field changes must be re-edited from the Power BI SERVICE, the PowerBIIntegration.Data / .Refresh() API surface, platform limitations, a troubleshooting playbook for stale-schema errors, and the end-to-end cross-environment REPOINT workflow that hardcodes the correct appId / EnvironmentId per branch."
 ---
 
 # Power BI <-> Power Apps Integration Skill
 
 ## Provenance and maintenance
 
-- **Authored from**: a real production incident in this workspace (a Power BI-embedded
+- **Authored from**: a real production incident (a Power BI-embedded
   canvas app whose `PowerBIIntegration.Data` showed stale columns after the report's
   field well was changed in Desktop) plus the official Microsoft documentation
   ([Power Apps visual for Power BI](https://learn.microsoft.com/en-us/power-apps/maker/canvas-apps/powerapps-custom-visual)).
@@ -1205,6 +1263,12 @@ description: "Use when: building, editing, or debugging a canvas app embedded in
 - Symptoms: new columns added in Power BI don't appear in the app; IntelliSense shows an
   old set of columns; formulas referencing a recently-added field throw errors; data
   isn't passing into the app while editing.
+- **Cross-environment repoint** task: the user gives a report (or reports) that lives in
+  several DevOps branches (dev/prod, or dev/stage/prod) and wants the Power Apps / Power
+  Automate visuals in each branch to point at that branch's Power Platform environment.
+  Phrasings: "repoint", "these visuals point to dev, fix prod", "hardcode the prod ids",
+  "lock the app/flow ids per environment". -> jump to **Cross-environment repoint
+  workflow** below.
 
 ---
 
@@ -1398,6 +1462,127 @@ When a user reports Power BI integration trouble, walk this list:
 
 ---
 
+## Cross-environment repoint workflow (lock PowerApps/Flow visuals per DevOps branch)
+
+> **Authored from**: a real workspace task - repointing a Power BI report's embedded
+> Power Platform visuals from one environment to another across DevOps branches.
+> Mechanical and repeatable; this section is the A-to-Z playbook.
+
+### What this is
+A **Power Apps visual** and a **Power Automate (Flow) visual** embedded in a Power BI
+(PBIR) report each carry a **hardcoded pointer to one specific Power Platform
+environment**. When the same report is promoted through DevOps branches
+(`dev -> prod`, or `dev -> stage -> prod`), every branch's copy must point at the
+**matching** environment. The pointers are static literals inside each `visual.json`;
+rewriting them "locks" each branch to its environment (they act like a fixed parameter
+and survive future development).
+
+### What I need from you (the ONLY inputs)
+1. **The report name(s)** - the `*.Report` (PBIR) folder name(s).
+2. **Which workspace folders are the DevOps branches**, and which is `dev`, `stage`,
+   `prod`. The **`dev` branch is the source of truth** for the DEV ids and is left
+   **unchanged**; `stage`/`prod` branches get rewritten.
+3. **One confirmation** (Phase 2) that the discovered ids really are the **DEV** values.
+
+Everything else (discovery, live-environment id resolution, the hardcode, verification)
+I do myself.
+
+### The two visual types and their environment-specific identifiers
+| Visual | `visual.visualType` prefix | JSON literal(s) holding the env pointer |
+|--------|----------------------------|-----------------------------------------|
+| **Power Apps** | `PowerApps_PBI_CV_...` | `visual.objects.general[0].properties.appId` = `'/providers/Microsoft.PowerApps/apps/<appId>'` |
+| **Power Automate (Flow)** | `FlowVisual_...` | `visual.objects.flowInfo[0].properties.FlowId` = `'/providers/Microsoft.ProcessSimple/environments/<envId>/flows/<flowId>'` **and** `...EnvironmentId` = `'<envId>'` |
+
+Golden facts (verified):
+- **PowerApps `appId` is environment-specific** -> it **changes** per environment and MUST
+  be swapped.
+- **Flow `<flowId>` is solution-aware -> SAME GUID in every environment.** Only `<envId>`
+  changes. So in a Flow visual you swap the env id in **two** places (the FlowId path +
+  the EnvironmentId property) and **leave the flow GUID alone**.
+- **Leave untouched** (env-agnostic): `ManagementUri`, `EnvironmentLocation`
+  (e.g. `unitedstates`), `EnvironmentRegion` (e.g. `westus`), `someSettings`.
+
+### Phase 1 - Discover the visuals (read-only)
+> **DevOps repo folders are usually gitignored**, so `grep_search` / `file_search` return
+> nothing. Use a terminal scan with absolute `-LiteralPath`.
+
+Enumerate `definition/pages/*/visuals/*/visual.json` for each branch's report and pull
+`visualType` + the identifier literals:
+```powershell
+$base = "<abs path to ...\<Report>.Report>"
+Get-ChildItem -LiteralPath $base -Recurse -Filter visual.json |
+  Select-String -Pattern '/apps/[0-9a-f-]+','/environments/[0-9a-f-]+/flows/[0-9a-f-]+',"'[0-9a-f-]{36}'" -AllMatches |
+  ForEach-Object { foreach($m in $_.Matches){ "{0} :: {1}" -f ($_.Path -replace [regex]::Escape($base),'...'), $m.Value } } | Sort-Object
+```
+Build a per-visual map: `page folder \ visual folder \ type \ friendly title \ current id(s)`.
+Each Flow visual should show the env id **twice** (FlowId path + EnvironmentId).
+
+### Phase 2 - Confirm DEV with the user (gate)
+Present the distinct DEV ids found (the `appId`(s), `envId`, `flowId`(s)) and the visual
+map. **Stop and get explicit confirmation** that these are the DEV environment values
+before resolving or editing anything.
+
+### Phase 3 - Resolve the target ids from the live Power Platform
+For **each** target environment (`stage` if it exists, then `prod`):
+1. **Environment ID** - select that env's `pac` auth profile and run `pac org who` (or use
+   a known/confirmed env id).
+2. **PowerApps App ID per app** - the Dataverse `canvasapps` table's **`canvasappid` IS
+   the `appId` the visual uses**. `pac canvas list` does **not** expose the GUID. Match by
+   app display/unique name. Mint a token if needed and query the Web API:
+   ```powershell
+   $tok = (az account get-access-token --resource https://<org>.crm.dynamics.com --query accessToken -o tsv)
+   irm "https://<org>.crm.dynamics.com/api/data/v9.2/canvasapps?`$select=displayname,name,canvasappid" -Headers @{ Authorization = "Bearer $tok" }
+   ```
+3. **Flow** - GUID is unchanged; just **confirm it exists/active** in the target env via
+   the `workflows` table (`workflowid eq <flowId>`, expect `statecode=1`/Activated,
+   `category=5` cloud flow). If a flow is **missing** in the target env, **flag it** rather
+   than guessing.
+4. **Validation trick (high confidence):** sibling apps that already work in a target-env
+   report will have live `canvasappid`s that **exactly match** the App IDs baked into those
+   working reports - proving `canvasappid` == the visual's `appId`.
+5. **Restore the original active `pac` auth profile** afterward (`pac auth select --index N`)
+   - read-only queries shouldn't leave the profile switched. `pac` is often not on PATH;
+   use the full `pac.exe` under the VS Code extension `globalStorage` if needed.
+
+Record a clean mapping per environment, e.g. (placeholder ids):
+```
+DEV   appId <dev-appId>  | env <dev-envId>  | flow <flowId>
+PROD  appId <prod-appId> | env <prod-envId> | flow <flowId>   (flow GUID identical)
+```
+
+### Phase 4 - Hardcode into the target branch(es)
+For each target branch's report, edit every relevant `visual.json` with the **file-editing
+tools** (`multi_replace_string_in_file`), **not** terminal sed:
+- **PowerApps visuals:** `appId` DEV -> target.
+- **Flow visuals:** `EnvironmentId` DEV -> target in **both** the FlowId path **and** the
+  EnvironmentId property (flow GUID stays).
+Apply `stage` ids into the stage branch and `prod` ids into the prod branch - **never cross
+them**. The `dev` branch stays as-is. Files are pretty-printed JSON; target the
+`appId` / `FlowId` / `EnvironmentId` literal blocks for unique matches within each file.
+
+### Phase 5 - Verify (per target branch)
+Re-scan and assert:
+- **0** DEV ids remain (`appId` and `envId`).
+- Target `appId` count == number of PowerApps visuals.
+- Target `envId` count == **2 x** number of Flow visuals.
+- Every `visual.json` still parses (`Get-Content -Raw | ConvertFrom-Json`).
+```powershell
+$files = Get-ChildItem -LiteralPath $base -Recurse -Filter visual.json
+# tally DEV vs target appId/envId occurrences and ConvertFrom-Json each file; expect DEV=0
+```
+
+### Phase 6 - Hand off
+Report the per-visual change table and the verification counts. Leave the edits **staged in
+the working tree** - the user pushes each branch themselves. Touch **only** the report's
+`visual.json` files (no semantic-model or other files).
+
+### One-line recap
+> Give me the **report name(s)** and which folders are the **dev / stage / prod** DevOps
+> branches; confirm once that the discovered ids are DEV. I handle discovery, live-env id
+> resolution, the per-branch hardcode, and verification end to end.
+
+---
+
 ## Sources
 
 - Microsoft Learn - [Power Apps visual for Power BI](https://learn.microsoft.com/en-us/power-apps/maker/canvas-apps/powerapps-custom-visual)
@@ -1405,6 +1590,8 @@ When a user reports Power BI integration trouble, walk this list:
 - Microsoft Learn - [Add a Power Apps visual to a report (tutorial)](https://learn.microsoft.com/en-us/power-bi/visuals/power-bi-visualization-powerapp).
 - First-hand workspace incident (stale `PowerBIIntegration.Data` schema, resolved by
   re-editing the app from the Power BI Service).
+- First-hand workspace task (repointing a Power BI report's embedded Power Platform
+  visuals across DevOps branches; basis of the Cross-environment repoint workflow).
 '@ | Set-Content -Path $pbiPaSkillPath -Encoding UTF8
     Write-Host "  $(if ($updateMode) {'Updated'} else {'Created'}) .github/skills/pbi-powerapps-integration/SKILL.md"
 } else {
