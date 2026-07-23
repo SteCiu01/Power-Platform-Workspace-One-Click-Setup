@@ -19,6 +19,35 @@ authentication, environment sync, and solution management for you.
 
 ---
 
+## Contents
+
+- [Why this exists](#why-this-exists)
+- [What is this?](#what-is-this)
+- [What you get](#what-you-get)
+- [Prerequisites](#prerequisites)
+- [Quick start](#quick-start)
+  - [1. Get the files](#1-get-the-files)
+  - [2. Run the installer](#2-run-the-installer)
+  - [3. Start working](#3-start-working)
+  - [4. Keeping it up to date](#4-keeping-it-up-to-date)
+- [What the agents can do](#what-the-agents-can-do)
+  - [The team — who does what](#the-team--who-does-what)
+  - [Automated session startup](#automated-session-startup)
+  - [Day-to-day commands](#day-to-day-commands)
+  - [Skill-based development](#skill-based-development)
+  - [Editing canvas apps and flows: offline vs live (real-time)](#editing-canvas-apps-and-flows-offline-vs-live-real-time)
+  - [Conflict resolution and sync](#conflict-resolution-and-sync)
+  - [Safety built in](#safety-built-in)
+- [Workspace structure](#workspace-structure)
+- [How it works under the hood](#how-it-works-under-the-hood)
+- [FAQ](#faq)
+- [Current status (v0.3.0)](#current-status-v030)
+- [Contributing](#contributing)
+- [Files in this repository](#files-in-this-repository)
+- [License](#license)
+
+---
+
 ## Why this exists
 
 This is a personal project — and like most personal projects, it started from a real frustration.
@@ -30,6 +59,8 @@ What I was looking for was something like the experience I already had on the da
 What I found was **[Power Platform Tools for VS Code](https://marketplace.visualstudio.com/items?itemName=microsoft-IsvExpTools.powerplatform-vscode)**. It provides the PAC CLI, auth panels, and environment browsing — but the experience didn't feel as immediate and user-friendly, at least for me, as the Fabric extensions are. On top of that, I noticed that the general GitHub Copilot agent was not referencing the Power Platform skills out of the box.
 
 So I put together a custom Copilot agent that I trigger at the start of every Power Platform session. It loads its skills, authenticates against my tenant, syncs my environments with the local folder, and gets me ready to work in seconds. It became an indispensable part of my daily flow almost immediately. It also complements the Power Platform Tools extension nicely — having both active gives you visual panels for auth and environments alongside the agent's natural-language workflow.
+
+That single agent was the seed. As I leaned on it more, one generalist trying to do everything started to show its limits: canvas apps, cloud flows, Copilot Studio topics, model-driven pages and Dataverse schema each have their own conventions, and cramming all of that context into one agent made it a jack-of-all-trades and a master of none. So it evolved — from a lone assistant into a small **agentic team**: one **Master** that handles setup, understands what you're asking for, and routes the work, delegating to specialist **Team Leads** who each own a single Power Platform area and go deep on it, with executives for planning, quality-gating and workspace upkeep sitting alongside. Same idea as before — get me set up and get out of my way — just organised like a real team, so each part can be genuinely good at its own job.
 
 Then I thought: *this should be replicable*. Not just for me — for anyone who works with Power Platform and wants to enhance the developer workflow. So I packaged everything up into a one-click installer and a shareable agent configuration.
 
@@ -54,10 +85,13 @@ for Power Platform development in VS Code. Instead of manually setting up
 folders, config files, CLI tools, and agent definitions, you run a single
 script and everything is ready.
 
-Once set up, a custom Copilot agent called **Power Platform Master Agent** lives
-inside your workspace and acts as your AI-powered co-pilot for the full Power
-Platform development lifecycle. It handles authentication,
-environment sync, and solution management, but it also **builds and edits Power
+Once set up, a team of custom Copilot agents lives inside your workspace and
+acts as your AI-powered co-pilot for the full Power Platform development
+lifecycle. You talk to one entry point — **Power Platform Master** — which
+handles authentication, environment sync and solution management, then
+**delegates** the actual building and editing to specialist **Team Leads**
+(Canvas Apps, Power Automate, Power Pages, Code Apps, Model Apps, Mobile Apps,
+MCP Apps, Solution ALM). Together they **build and edit Power
 Platform components directly**: canvas apps, model-driven app pages, cloud flows,
 Copilot Studio topics, and Dataverse schema — all through natural language in the
 Copilot Chat panel, guided by Microsoft's official [power-platform-skills](https://github.com/microsoft/power-platform-skills).
@@ -68,9 +102,11 @@ Copilot Chat panel, guided by Microsoft's official [power-platform-skills](https
 
 | Component | Description |
 |---|---|
-| **Power Platform Master Agent** | A custom Copilot Chat agent that covers the full development lifecycle — auth, environment sync, solution management, **and agentic development**: build and edit canvas apps, flows, Copilot Studio topics, model-driven pages, and Dataverse schema through natural language |
+| **Agent team (12 agents)** | A hierarchy of custom Copilot Chat agents: 4 executives (**Power Platform Master**, **Solution Architect**, **Integration QA & Change Controller**, **Workspace Maintainer**) + 8 topic **Team Leads** (Canvas Apps, Power Automate, Power Pages, Code Apps, Model Apps, Mobile Apps, MCP Apps, Solution ALM & Environments). The Master coordinates and delegates; the Leads build and edit through natural language |
 | **Microsoft Power Platform Skills** | Git-cloned from [microsoft/power-platform-skills](https://github.com/microsoft/power-platform-skills) — no npm install or admin rights required (see [FAQ](#faq)) |
 | **Custom embedded skill** | `pbi-powerapps-integration` — a maintainer-authored, house-style skill (committed in `.github/skills/`) for canvas apps embedded in Power BI via the Power Apps visual, written from a real production incident |
+| **Live authoring MCP servers** | `.vscode/mcp.json` registers the **Canvas Authoring** server (real-time canvas coauthoring via `dnx` / .NET 10) and the **Power Automate FlowAgent** server (Node.js 18+, authenticated with `az login`). The installer auto-installs both runtimes by default; the servers start on demand |
+| **Integrity + self-test** | `.github/installed-manifest.json` records a SHA256 of every installer-managed file (re-checkable with `-VerifyRoot`), and a post-generation self-test writes `.github/agent-docs/guardrail-status.json` |
 | **PAC CLI Helper Script** | `scripts/pac-workflows.ps1` — pull, push, and init solutions with a single command |
 | **Git Version Control** | Repository initialised with a clean `.gitignore` and first commit out of the box |
 | **Organised Folder Structure** | `exports/`, `deploy/`, `scripts/`, `.github/agents/` — everything where it should be |
@@ -87,9 +123,10 @@ Before running the installer, make sure you have:
 | **GitHub Copilot + Agent Mode** | Yes | Install from VS Code Extensions marketplace. Agent mode must be enabled (`chat.agent.enabled`). Note: org tenants may need admin to enable this. |
 | **Git** | Yes | [git-scm.com](https://git-scm.com) |
 | **PAC CLI** | Auto-installed | The installer installs it for you (via .NET tool or the standalone MSI) — no action needed |
-| **.NET 10 SDK** | Live authoring only | Needed **only** for the live canvas authoring flow (real-time coauthoring via MCP). The installer auto-installs it; if that fails, grab it from [dotnet.microsoft.com](https://dotnet.microsoft.com/download/dotnet/10.0). Offline editing works without it |
+| **.NET 10 SDK** | Auto-installed (live canvas authoring) | Needed for the live canvas authoring flow (real-time coauthoring via MCP). The installer auto-installs it by default; if that fails, grab it from [dotnet.microsoft.com](https://dotnet.microsoft.com/download/dotnet/10.0). Offline editing works without it |
+| **Node.js 18+** | Auto-installed (live flow authoring) | Powers the Power Automate **FlowAgent** MCP server (live cloud-flow authoring, authenticated with `az login`). The installer auto-installs it by default via winget — non-blocking; if it can't, everything else still works and offline flow editing is unaffected (grab it from [nodejs.org](https://nodejs.org) and re-run to enable live authoring later) |
 | **[Power Platform Tools](https://marketplace.visualstudio.com/items?itemName=microsoft-IsvExpTools.powerplatform-vscode)** | Auto-installed (optional) | Adds visual auth/environment panels, YAML language support, and auto-provides the PAC CLI. The installer detects it and installs it via `code --install-extension` if missing — non-blocking, and the agent works without it |
-| **Azure CLI (`az`)** | Optional — niche | Used **only** to auto-resolve live Power Apps `appId`s during the cross-environment **repoint** workflow (specific Power BI ↔ Power Apps tasks). The installer asks once and installs it via winget if you say yes (**default: skip**); otherwise grab it from [aka.ms/installazurecli](https://aka.ms/installazurecli). Everything else works without it |
+| **Azure CLI (`az`)** | Auto-installed | Two jobs: it **authenticates the Power Automate FlowAgent MCP server** (`az login`) for live cloud-flow authoring, and it **auto-resolves live Power Apps `appId`s** during the cross-environment **repoint** workflow (specific Power BI ↔ Power Apps tasks). The installer auto-installs it by default via winget — non-blocking; if it can't, grab it from [aka.ms/installazurecli](https://aka.ms/installazurecli). Everything else works without it |
 
 ---
 
@@ -120,19 +157,21 @@ Enter a name for your workspace folder (default: Power Platform): _
 
 Type a name or press **Enter** to accept the default. The script will:
 
-1. Check all prerequisites (git, VS Code, GitHub Copilot, pac CLI, .NET 10 SDK, Power Platform Tools) — confirming each with a green check and auto-installing the ones it can
+1. Check all prerequisites (git, VS Code 1.117.0+, GitHub Copilot, pac CLI, .NET 10 SDK, Node.js 18+, and Azure CLI) — confirming each with a green check and auto-installing the ones it can (the live-authoring runtimes are non-blocking)
 2. Create the folder at `C:\Users\<you>\<folder name>\`
-3. Generate all config files (`.gitignore`, agent definition, Copilot instructions, helper scripts)
-4. Clone Microsoft's Power Platform Skills repository
-5. Initialise a git repo with the first commit
-6. Open the workspace in VS Code
+3. Generate all config files — the **12 agent definitions**, Copilot instructions, `AGENTS.md`, helper scripts, and the VS Code + MCP config (`canvas-authoring` + `flow-agent`)
+4. Write the workspace guidance and **integrity manifest** (SHA256 of every managed file) and run a self-test over the generated agents
+5. Clone Microsoft's Power Platform Skills repository
+6. Initialise a git repo with the first commit
+7. Open the workspace in VS Code
 
 ### 3. Start working
 
 Once VS Code opens:
 
 1. Open **Copilot Chat** (sidebar or `Ctrl+Shift+I`)
-2. Select **Power Platform Master Agent** from the agent dropdown
+2. Select **Power Platform Master** from the agent dropdown (start here unless
+   you know exactly which specialist you want — the Master routes for you)
 3. Type anything — the agent takes over from here
 
 On first message the agent will:
@@ -148,18 +187,80 @@ When a new version is released, updating is the same one step as installing:
 
 1. [Download the latest installer files](https://github.com/SteCiu01/Power-Platform-Workspace-One-Click-Setup/tree/main/power-platform-workspace-installer)
 2. **Double-click `Setup-PowerPlatformWorkspace.bat`** and enter the **same folder name** you used originally
-3. The installer detects the existing folder and switches to **update mode** — it refreshes the agent definition, Copilot instructions, helper scripts, VS Code configs, and pulls the latest power-platform-skills, then stops
-4. Your solutions, environment folders, exports, and any personal files are **not touched**
+3. The installer detects the existing folder and switches to **update mode** — it force-refreshes the 12 agent definitions, Copilot instructions, helper scripts, VS Code configs, and the power-platform-skills clone, prunes anything older versions shipped but no longer do, then stops
+4. Your solutions, environment folders, exports, and any personal files you created are **not touched**
 
 That's it. Reopen the workspace in VS Code and you're on the latest version.
 
+> **Important — what update mode overwrites vs. what it never touches.**
+> To guarantee the workspace keeps working, the installer is **authoritative**
+> over everything it ships. On every update it:
+> - **Force-refreshes** the 12 agents, Copilot instructions, embedded skills,
+>   helper scripts, and VS Code configs to the shipped version — **any edits you
+>   made to those files are overwritten.**
+> - **Force-refreshes** the cloned `power-platform-skills` to match upstream (local
+>   edits are stashed, recoverable with `git -C power-platform-skills stash list`).
+> - **Self-prunes**: files an older version shipped but the current one no longer
+>   ships are removed automatically, so no stale scaffolding lingers.
+>
+> **Your work is safe.** Solutions, environment folders, exports, and **any new
+> files you create are never touched** — they are not part of what the installer
+> manages, so they are never overwritten or pruned.
+>
+> **Want to customise or extend?** Don't edit our agents, skills, or configs (they
+> get reset). Instead **add a NEW file** in `.github/` — a new agent, a new skill,
+> a new instructions file. New files are yours and the installer leaves them alone.
+
+> **Maintaining a shared workspace?** If your team clones a workspace you own, it's worth re-running the installer periodically even without a new release — update mode re-pulls the latest Microsoft `power-platform-skills` and re-applies the newest agent definitions, Copilot instructions and configs, so everyone stays on current guidance. Your solutions and personal files stay untouched.
+
 ---
 
-## What the agent can do
+## What the agents can do
+
+The workspace runs as a **team**: you talk to **Power Platform Master**, which handles setup and routing and **delegates** the building and editing to the specialist **Team Leads** (Canvas Apps, Power Automate, Power Pages, Code Apps, Model Apps, Mobile Apps, MCP Apps, Solution ALM), with the Solution Architect, Integration QA & Change Controller and Workspace Maintainer working alongside. In practice you just describe what you want and the right agent picks it up — the sections below describe what the team does for you.
+
+At a glance, the team can:
+
+- **Run your whole session for you** — on your first message the Master authenticates you (`pac auth`), lets you pick an environment, inventories every solution/flow/app, and syncs it all locally (see [Automated session startup](#automated-session-startup)).
+- **Manage solutions and environments** — pull, push, compare and status across DEV/TEST/PROD with git history kept clean (see [Day-to-day commands](#day-to-day-commands)).
+- **Build and edit components through official skills** — seven Microsoft-authored skills from the cloned [power-platform-skills](https://github.com/microsoft/power-platform-skills) cover canvas apps, cloud flows, Power Pages, model-driven pages, code apps, mobile apps and MCP widgets; only Copilot Studio topics and Dataverse schema are edited from their unpacked source (see [Skill-based development](#skill-based-development)).
+- **Edit live, in real time** — two MCP servers (both runtimes installed by default) let the agents author **canvas apps** in an open Power Apps Studio session and **cloud flows** straight against your environment, with an automatic fall back to offline editing when a runtime is missing (see [Editing canvas apps and flows: offline vs live](#editing-canvas-apps-and-flows-offline-vs-live-real-time)).
+- **Apply house knowledge** — a committed custom skill (`pbi-powerapps-integration`) adds Power BI ↔ Power Apps embedding guidance and the cross-environment repoint workflow (see [Custom embedded skill](#custom-embedded-skill--power-bi--power-apps-integration)).
+- **Keep you safe** — Production imports need an explicit `confirm push to prod`, auth is re-checked before every export/import, and nothing is committed as a raw zip (see [Safety built in](#safety-built-in)).
+
+### The team — who does what
+
+Every agent has a single, well-defined job and only the tools it needs for it. You normally only talk to **Power Platform Master**; it routes to the rest. The table below is the full roster — the four executives that coordinate, review and maintain, and the eight Team Leads that each own one Power Platform area.
+
+**Tools legend:** **Delegate** = can hand work to other agents · **Read** = read files · **Search** = search the workspace · **Run** = run terminal/CLI commands (`pac`, `az`, git, `dnx`, `node`) · **Edit** = write to files.
+
+#### Executives (coordinate, plan, gate, maintain)
+
+| # | Agent | What it does | Tools | Skills / MCP |
+|---|---|---|---|---|
+| **000** | **Power Platform Master** | Single entry point. Runs the setup/working flow, understands your request, then **delegates** — to the Solution Architect for design or straight to a Team Lead for execution. Coordinates, never implements. | Delegate · Read · Search · Run | — (routes to skills via the Leads) |
+| **001** | **Solution Architect** | Advisory design authority for tough or cross-cutting work: picks the right component types, plans the solution/ALM shape, and sequences delegation across the Leads. **Read-only — produces a plan, never edits.** | Delegate · Read · Search | — (planning only) |
+| **002** | **Integration QA & Change Controller** | Reviews changes before they leave the workspace: validates solution packs, runs git diffs, gates Production imports and enforces the `confirm push to prod` rule. **Verify only — never authors source.** | Read · Search · Run | — (review + Prod gate) |
+| **003** | **Workspace Maintainer** | Keeps the workspace itself healthy: refreshes the cloned `power-platform-skills`, maintains `.vscode` config / MCP registrations / the custom embedded skill, and repairs setup drift. Edits scaffolding, not your solution source. | Read · Search · Run · Edit | Maintains all skills + `.vscode/mcp.json` |
+
+#### Team Leads (build and edit — one area each)
+
+| # | Agent | What it does | Tools | Skills / MCP |
+|---|---|---|---|---|
+| **010** | **Canvas Apps Lead** | Owns canvas apps: offline `.pa.yaml` authoring **and live coauthoring** via the Canvas Authoring MCP server, plus Power BI-embedded (`PowerBIIntegration`) apps and cross-environment repoint work. | Delegate · Read · Search · Run · Edit | `canvas-apps`, `pbi-powerapps-integration` · **MCP:** `canvas-authoring` (.NET 10) |
+| **020** | **Power Automate Lead** | Owns cloud and desktop flows: browse, create, build, debug, diagnose and route flows across environments, **live** through the FlowAgent MCP server where available. | Delegate · Read · Search · Run · Edit | `power-automate` · **MCP:** `flow-agent` (Node.js 18+, `az login`) |
+| **030** | **Power Pages Lead** | Owns Power Pages sites, including code sites built with React, Angular, Vue or Astro. | Delegate · Read · Search · Run · Edit | `power-pages` |
+| **040** | **Code Apps Lead** | Owns Power Apps code apps: React + Vite + TypeScript projects and their Power Platform SDK wiring. | Delegate · Read · Search · Run · Edit | `code-apps` |
+| **050** | **Model Apps Lead** | Owns model-driven apps: generative pages, forms, views and sitemaps. | Delegate · Read · Search · Run · Edit | `model-apps` |
+| **060** | **Mobile Apps Lead** | Owns mobile apps built with Expo / React Native on the Power Platform. | Delegate · Read · Search · Run · Edit | `mobile-apps` |
+| **070** | **MCP Apps Lead** | Owns MCP-based app generation — interactive HTML widgets for MCP tools built with the MCP Apps protocol. | Delegate · Read · Search · Run · Edit | `mcp-apps` |
+| **080** | **Solution ALM & Environments Lead** | Owns solution lifecycle and environments via `pac` CLI: init/export/unpack/pack/import, publisher setup, environment selection and cross-environment promotion — Production imports gated on explicit confirmation. | Delegate · Read · Search · Run · Edit | — (works `pac` CLI directly; Copilot Studio topics + Dataverse schema also handled here) |
+
+> **Copilot Studio topics** and **Dataverse schema** have no dedicated Microsoft skill yet, so they're edited from unpacked solution source — routed by the Master and handled with the ALM Lead's `pac` tooling. See the [honest scope note](#day-to-day-commands) above.
 
 ### Automated session startup
 
-You don't configure anything manually. On your **first message** each session, the agent automatically:
+You don't configure anything manually. On your **first message** each session, **Power Platform Master** automatically:
 
 1. **Updates skills** — pulls the latest power-platform-skills from GitHub
 2. **Authenticates you** — checks for an existing `pac auth` profile or walks you through device-code login
@@ -189,26 +290,29 @@ Once your session is active, just tell the agent what you need in plain English:
 |---|---|
 | `add a text input and a submit button to the Contact screen in MyApp` | Edits the canvas app's PA YAML source directly, following the canvas-apps skill instructions, then shows you a diff |
 | `create a new generative page for the Account table in my model-driven app` | Scaffolds a React + TypeScript + Fluent page using the model-apps skill and deploys it via PAC CLI |
-| `add a condition to my approval flow that sends an email when status is Rejected` | Edits the cloud flow's JSON source inside the unpacked solution and explains every change |
+| `add a condition to my approval flow that sends an email when status is Rejected` | Uses the power-automate skill + FlowAgent MCP to edit the cloud flow live against your environment (falling back to editing the unpacked JSON offline if the runtime is unavailable) |
 | `add a new topic to my Copilot Studio agent that handles order status questions` | Edits the topic YAML file in the unpacked solution, following the dialog structure Power Platform expects |
 | `add a new column 'Priority' (choice field) to the Task table in Dataverse` | Updates the entity and attribute XML in the solution's `Other/` folder and flags what needs a manual publish |
 
-> **Honest scope note:** Canvas apps and model-driven pages are guided by official Microsoft-authored skill instructions from the cloned repo. For Power Automate flows, Copilot Studio topics, and Dataverse schema — no dedicated skill exists yet in that repo — so the agent works from its own knowledge of the file formats, editing the unpacked source directly. This works well in practice but is less prescriptive. Always review diffs before pushing.
+> **Honest scope note:** Most components — canvas apps, cloud flows, Power Pages, model-driven pages, code apps, mobile apps and MCP widgets — are guided by official Microsoft-authored skill instructions from the cloned repo. Only **Copilot Studio topics** and **Dataverse schema** have no dedicated skill yet, so for those the agent works from its own knowledge of the file formats, editing the unpacked source directly — effective, but less prescriptive. Always review diffs before pushing.
 
 ### Skill-based development
 
 The agent doesn't just move solutions around — it can **build and edit Power Platform components** using Microsoft's official [power-platform-skills](https://github.com/microsoft/power-platform-skills) library. Before each development task, the agent reads the relevant `SKILL.md` file and follows its instructions step by step to apply the correct edits to your source files, then shows you a diff before touching anything.
 
-The skills cover four areas today:
+The cloned repo ships **seven official plugins today**, each with its own `SKILL.md` (and, where relevant, its own MCP server):
 
 | Skill | What you can ask for |
 |---|---|
-| **canvas-apps** | Add/modify screens, controls, and properties in canvas apps via PA YAML. Requires Canvas Authoring MCP server + .NET 10 SDK |
-| **model-apps** | Generate and deploy custom pages for model-driven apps (React + TypeScript + Fluent) |
-| **code-apps** | Build and deploy standalone code apps connected to Power Platform via connectors (React + Vite + TypeScript) |
-| **power-pages** | Create and modify Power Pages code sites (React, Angular, Vue, or Astro) |
+| **canvas-apps** | Author canvas apps via PA YAML (`.pa.yaml`) through the **Canvas Authoring MCP server** — requires the .NET 10 SDK |
+| **power-automate** | Build, edit, run, and debug **Power Automate cloud flows** through the **FlowAgent MCP server** — requires Node.js 18+ and `az login` |
+| **power-pages** | Create and deploy **Power Pages code sites** — SPAs in React, Angular, Vue, or Astro |
+| **model-apps** | Build and deploy **generative pages** for model-driven apps (React + TypeScript + Fluent, deployed via PAC CLI) |
+| **code-apps** | Build and deploy standalone **code apps** connected to Power Platform via connectors (React + Vite + TypeScript, deployed via PAC CLI) |
+| **mobile-apps** | Build and deploy **code apps for mobile** with native device capabilities (Expo + React Native + TypeScript, deployed via Power Apps Wrap) |
+| **mcp-apps** | Generate interactive **MCP App widgets** for MCP tools (HTML widgets using the MCP Apps protocol) |
 
-For components not yet covered by a dedicated skill — **Power Automate flows** (JSON), **Copilot Studio topics** (YAML), and **Dataverse schema** (solution XML) — the agent reads and edits the unpacked source files directly and walks you through each change.
+For the components **not yet covered by a dedicated skill** — **Copilot Studio topics** (YAML) and **Dataverse schema** (solution XML) — the agent reads and edits the unpacked source files directly and walks you through each change.
 
 #### Custom embedded skill — Power BI ↔ Power Apps integration
 
@@ -225,10 +329,10 @@ Unlike the cloned Microsoft skills, this one is **committed in the repo** (not g
 > the skills repo via git — which you already have — so there's zero extra
 > tooling or permissions needed. See [FAQ](#faq) for details.
 
-### Editing canvas apps: offline vs live (real-time)
+### Editing canvas apps and flows: offline vs live (real-time)
 
-Canvas apps can be edited two ways. The agent picks the right one for you, but
-it helps to know the difference.
+Canvas apps and cloud flows can be edited two ways. The agent picks the right
+one for you, but it helps to know the difference.
 
 **Offline editing (default — works for every component type)**
 
@@ -237,15 +341,20 @@ following the canvas-apps skill, shows you a diff, then packs and imports.
 Your changes show up in Power Apps Studio after the import and a refresh.
 Nothing extra is required beyond the PAC CLI.
 
-**Live editing (canvas apps only — real-time coauthoring via MCP)**
+**Live editing (real-time via MCP servers)**
 
-The agent drives an **open Power Apps Studio session in real time** through
-Microsoft's **Canvas Authoring MCP server**, which the installer registers in
-`.vscode/mcp.json`. Edits appear in the open Studio tab as the agent makes
-them — no pack/import step.
+Two live-authoring MCP servers are registered in `.vscode/mcp.json`, and the
+installer auto-installs their runtimes by default:
 
-This flow needs the **.NET 10 SDK** (the installer auto-installs it; it
-provides the `dnx` command that runs the MCP server). To use it:
+- **Canvas apps** — the **Canvas Authoring MCP server** (`dnx` / .NET 10) drives
+  an **open Power Apps Studio session in real time**; edits appear in the open
+  Studio tab as the agent makes them, with no pack/import step.
+- **Cloud flows** — the **Power Automate FlowAgent MCP server** (Node.js 18+,
+  authenticated with `az login`) lets the Power Automate Lead author flows live
+  against your environment instead of editing the unpacked JSON offline.
+
+For **live canvas authoring** (the **.NET 10 SDK** provides the `dnx` command
+that runs the MCP server), to use it:
 
 1. Open your app in **Power Apps Studio** (make.powerapps.com) in **edit** mode.
 2. Turn on coauthoring: **Settings → Updates → Coauthoring** — toggle it **on**
@@ -253,7 +362,7 @@ provides the `dnx` command that runs the MCP server). To use it:
 3. **Keep that browser tab open** for the whole session — closing it ends
    coauthoring and breaks the connection.
 4. Copy the full Studio URL from the address bar.
-5. In **Copilot Chat**, with **Power Platform Master Agent** selected, say
+5. In **Copilot Chat**, with **Power Platform Master** selected, say
    something like *"connect live canvas authoring"* and paste the Studio URL.
    The agent reads the environment, app, and cluster from the URL and connects
    the MCP server.
@@ -264,6 +373,41 @@ provides the `dnx` command that runs the MCP server). To use it:
 > If the .NET 10 SDK isn't installed (or a step above isn't met), the agent
 > falls back to offline editing automatically — you lose the real-time aspect,
 > not the ability to edit.
+
+For **live flow authoring** (the **FlowAgent MCP server** — bundled in the
+cloned `power-platform-skills` repo, run on **Node.js 18+** and authenticated
+with **`az login`**), to use it:
+
+1. **Sign in with the Azure CLI once per session.** Open a terminal in the
+   workspace and run `az login` — a browser window opens; pick the same
+   account you use for Power Platform. This is what authorises the FlowAgent
+   MCP server against your tenant (unlike canvas authoring, there's **no
+   coauthoring toggle and no browser tab to keep open** — the server talks to
+   your environment directly).
+2. *(First time only)* Make sure the FlowAgent server can start: it launches
+   from the cloned skills at
+   `power-platform-skills/plugins/power-automate/server/mcp.mjs` via Node.js.
+   The installer clones the repo and installs Node.js by default, so this is
+   already in place — just confirm VS Code has reloaded since setup.
+3. In **Copilot Chat**, select **Power Platform Master** (it routes you to the
+   **Power Automate Lead**) or pick the **Power Automate Lead** directly.
+4. Make sure you're connected to the right environment — if you haven't yet
+   this session, say *"connect to my environment"* and pick it. The Lead uses
+   your `pac auth` profile plus the `az login` token to target the right
+   tenant and environment.
+5. Ask for changes in plain English — *"create a cloud flow that emails me
+   when a new row is added to the Accounts table"*, or *"add a condition to my
+   approval flow that notifies the manager when status is Rejected"*. The Lead
+   builds or edits the flow **live against your environment** through the
+   FlowAgent MCP server — no pull/pack/import round-trip.
+6. Review what it did in the Power Automate portal (make.powerautomate.com);
+   the changes are already saved to your environment.
+
+> If **Node.js 18+** or an active **`az login`** session is missing (or the
+> FlowAgent server can't start), the Power Automate Lead falls back to editing
+> the flow's unpacked JSON offline automatically — same result, without the
+> real-time aspect. Re-run `az login` (or the installer to add Node.js) to
+> re-enable live authoring.
 
 ### Conflict resolution and sync
 
@@ -293,10 +437,22 @@ Power Platform/
 ├── .git/
 ├── .github/
 │   ├── agents/
-│   │   └── power-platform-master-agent.agent.md   ← the agent brain
-│   └── copilot-instructions.md                    ← workspace-level Copilot context
+│   │   ├── 000-power-platform-master.agent.md     ← entry point / coordinator
+│   │   ├── 001-solution-architect.agent.md        ← advisory planning (read-only)
+│   │   ├── 002-integration-qa-change-controller.agent.md ← review + Prod gate
+│   │   ├── 003-workspace-maintainer.agent.md      ← keeps skills/MCP healthy
+│   │   └── 010-080-*-lead.agent.md                ← 8 topic Team Leads
+│   ├── agent-docs/
+│   │   ├── starting-flow.md                        ← guided first-session setup flow
+│   │   ├── working-flow-reference.md               ← day-to-day working reference
+│   │   ├── tool-status.json                        ← runtime CLI/MCP availability (found + path)
+│   │   └── guardrail-status.json                   ← post-generation self-test result
+│   ├── skills/
+│   │   └── pbi-powerapps-integration/SKILL.md      ← custom embedded skill (committed)
+│   ├── copilot-instructions.md                    ← workspace-level Copilot context
+│   └── installed-manifest.json                    ← SHA256 of every managed file (-VerifyRoot)
 ├── .vscode/
-│   ├── mcp.json                                   ← Canvas Authoring MCP server (live editing)
+│   ├── mcp.json                                   ← Canvas Authoring + Flow Agent MCP servers
 │   ├── settings.json
 │   └── tasks.json
 ├── .gitignore
@@ -306,10 +462,12 @@ Power Platform/
 ├── power-platform-skills/                         ← Microsoft skills (gitignored)
 │   └── plugins/
 │       ├── canvas-apps/
+│       ├── power-automate/
+│       ├── power-pages/
 │       ├── code-apps/
-│       ├── mcp-apps/
 │       ├── model-apps/
-│       └── power-pages/
+│       ├── mobile-apps/
+│       └── mcp-apps/
 └── scripts/
     └── pac-workflows.ps1                          ← CLI helper script
 ```
@@ -322,19 +480,25 @@ solution source files.
 
 ## How it works under the hood
 
-The setup script (`Setup-PowerPlatformWorkspace.ps1`) is fully self-contained.
-It does not download anything except the public Microsoft skills repository.
-Every file it creates is embedded directly in the script — no external
-templates, no internet dependencies beyond `git clone`.
+The setup script (`Setup-PowerPlatformWorkspace.ps1`) is self-contained: every
+configuration file it writes — the 12 agent definitions, Copilot instructions,
+`AGENTS.md`, the flow docs, the custom embedded skill, and the VS Code + MCP
+config — is embedded directly in the script, with no external templates. The
+only things it fetches from the internet are the public Microsoft
+[power-platform-skills](https://github.com/microsoft/power-platform-skills)
+repository (via `git clone`) and any **missing prerequisites it auto-installs**
+for you: the PAC CLI (.NET tool or MSI), and — when missing — the .NET 10
+SDK, Node.js, the Azure CLI, and the Power Platform Tools extension (the
+live-authoring runtimes are installed by default, and all are non-blocking).
 
 The `.bat` wrapper exists solely to bypass Windows PowerShell execution policy
 restrictions. It calls the `.ps1` with `-ExecutionPolicy Bypass` so the script
 runs regardless of your organisation's policy settings.
 
 The script supports **update mode** — if you run it against an existing folder, it
-overrides all installation-managed files (agent definition, configs, skills) with
-the latest versions while leaving your solutions, environment folders, and personal
-files completely untouched.
+overrides all installation-managed files (the 12 agent definitions, configs, and
+the cloned skills) with the latest versions while leaving your solutions,
+environment folders, and personal files completely untouched.
 
 ---
 
@@ -347,8 +511,8 @@ A: Yes. The workspace is fully portable. Just open the new location in VS Code.
 A: You don't need to install it yourself. The installer sets it up
 automatically — via the .NET tool if a .NET SDK is present, otherwise via the
 standalone Power Platform CLI MSI (per-user, no admin rights). If it somehow
-can't be installed, the workspace is still created and Power Platform Master
-Agent will guide you on first run.
+can't be installed, the workspace is still created and the Power Platform
+Master agent will guide you on first run.
 
 **Q: What do I need for live (real-time) canvas authoring?**
 A: The **.NET 10 SDK** (the installer auto-installs it) plus an **open Power
@@ -356,11 +520,18 @@ Apps Studio tab with coauthoring enabled** (Settings → Updates → Coauthoring
 The installer registers Microsoft's Canvas Authoring MCP server in
 `.vscode/mcp.json`; the agent connects to it from the Studio URL you paste in
 chat. If the SDK isn't available, offline editing still works — see
-[Editing canvas apps: offline vs live](#editing-canvas-apps-offline-vs-live-real-time).
+[Editing canvas apps and flows: offline vs live](#editing-canvas-apps-and-flows-offline-vs-live-real-time).
+
+**Q: What do I need for live (real-time) flow authoring?**
+A: **Node.js 18+** and an **`az login`** session — both set up by the installer
+by default. The Power Automate **FlowAgent** MCP server (registered in
+`.vscode/mcp.json`) uses them to author cloud flows live against your
+environment. If either is missing, the agent edits the flow's unpacked JSON
+offline instead.
 
 **Q: Does this work on macOS or Linux?**
 A: The setup script is Windows-only (PowerShell + .bat). However, the
-workspace itself — including the Power Platform Master Agent — works on
+workspace itself — including the whole agent team — works on
 any OS once the files exist. You’d just need to create the folder structure
 manually or adapt the script.
 
@@ -374,7 +545,7 @@ before each task, so the skills work without any plugin framework.
 
 **Q: Can multiple people share the same workspace via git?**
 A: Absolutely. Push the workspace to a shared repo. Each team member clones it,
-selects Power Platform Master Agent, and connects to their own environment.
+selects Power Platform Master, and connects to their own environment.
 The `.gitignore` keeps exports, skills, and environment files clean.
 
 **Q: How do I update the skills?**
@@ -383,16 +554,19 @@ run `git -C power-platform-skills pull` manually.
 
 ---
 
-## Current status (v0.2.0-preview)
+## Current status (v0.3.0)
 
 | Area | Status |
 |---|---|
 | One-click setup (.bat + .ps1) | **Working** — tested on Windows 10/11 |
+| 12-agent hierarchy (Master → Architect / Team Leads) | **New in v0.3.0** — generated from an embedded, schema-validated manifest |
 | Agent session flow (auth → env → inventory → sync) | **Working** — tested daily |
 | Pull / push / compare / status commands | **Working** |
-| Skill-based editing via local SKILL.md files | **Working** — agent reads and follows instructions from the cloned repo |
+| Skill-based editing via local SKILL.md files | **Working** — agents read and follow instructions from the cloned repo |
 | Offline canvas/component editing (export → edit → import) | **Working** |
-| Live canvas authoring (real-time coauthoring via MCP) | **New in v0.2.0** — needs the .NET 10 SDK (auto-installed) |
+| Live canvas authoring (real-time coauthoring via MCP) | **Working** — needs the .NET 10 SDK (auto-installed) |
+| Power Automate MCP (flow-agent) | **New in v0.3.0** — needs Node.js 18+ and `az login` (both auto-installed) |
+| Manifest + generator integrity (`-EmitAgentsTo` / `-VerifyRoot`, Pester + CI) | **New in v0.3.0** |
 
 This is a pre-release. Expect rough edges. If something breaks, [open an issue](https://github.com/SteCiu01/Power-Platform-Workspace-One-Click-Setup/issues).
 
@@ -408,8 +582,8 @@ See **[CONTRIBUTING.md](CONTRIBUTING.md)** for the full guide — how to set up,
 branch naming, commit style, and PR expectations.
 
 Quick links:
-- [Report a bug](https://github.com/SteCiu01/Power-Platform-Workspace-One-Click-Setup/issues/new?template=bug_report.md)
-- [Request a feature](https://github.com/SteCiu01/Power-Platform-Workspace-One-Click-Setup/issues/new?template=feature_request.md)
+- [Report a bug](https://github.com/SteCiu01/Power-Platform-Workspace-One-Click-Setup/issues/new?template=bug_report.yml)
+- [Request a feature](https://github.com/SteCiu01/Power-Platform-Workspace-One-Click-Setup/issues/new?template=feature_request.yml)
 - [Open issues](https://github.com/SteCiu01/Power-Platform-Workspace-One-Click-Setup/issues)
 
 ---
@@ -420,6 +594,9 @@ Quick links:
 |---|---|
 | `power-platform-workspace-installer/Setup-PowerPlatformWorkspace.bat` | Double-click entry point — share this with your team |
 | `power-platform-workspace-installer/Setup-PowerPlatformWorkspace.ps1` | The full installer — must be in the same folder as the .bat |
+| `schema/agent-manifest.schema.json` | JSON Schema the embedded agent manifest is validated against |
+| `tests/` | Pester suite that guards the manifest + generated agents (see `tests/README.md`) |
+| `CLI-FUNCTIONALITIES.md` | Reference for the CLIs the workspace drives (pac, az, dnx, node) |
 | `CHANGELOG.md` | Version history and release notes |
 | `CONTRIBUTING.md` | Guide for contributors |
 | `CODE_OF_CONDUCT.md` | Community standards |

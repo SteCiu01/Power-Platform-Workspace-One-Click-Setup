@@ -29,10 +29,13 @@ body:
       label: What area does this relate to?
       options:
         - Setup script (.bat / .ps1)
-        - Power Platform Master Agent
+        - Agent manifest / hierarchy (Master, Architect, QA, Team Leads)
+        - A specific Team Lead (Canvas, Power Automate, Power Pages, Code, Model, Mobile, MCP, ALM)
+        - MCP servers (canvas-authoring, flow-agent)
         - PAC CLI helper script
         - Workspace structure / folder layout
         - Skills integration
+        - Tests / CI (Pester, validate.yml)
         - Documentation
         - Cross-platform support
         - Other

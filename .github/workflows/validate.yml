@@ -1,0 +1,52 @@
+name: Validate installer manifest
+
+# Runs the Pester suite that guards the embedded agent manifest and the
+# generated workspace structure. Triggers on every push and pull request so a
+# broken change is flagged (and, with branch protection, blocked from merge).
+on:
+  push:
+    paths:
+      - 'power-platform-workspace-installer/**'
+      - 'schema/**'
+      - 'tests/**'
+      - '.github/workflows/validate.yml'
+  pull_request:
+    paths:
+      - 'power-platform-workspace-installer/**'
+      - 'schema/**'
+      - 'tests/**'
+      - '.github/workflows/validate.yml'
+  workflow_dispatch:
+
+jobs:
+  pester:
+    name: Pester (Windows / PowerShell 7)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Pester v5
+        shell: pwsh
+        run: |
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+          Install-Module Pester -MinimumVersion 5.5.0 -Force -SkipPublisherCheck -Scope CurrentUser
+
+      - name: Run tests
+        shell: pwsh
+        run: |
+          Import-Module Pester -MinimumVersion 5.5.0
+          $config = New-PesterConfiguration
+          $config.Run.Path = './tests'
+          $config.Run.Exit = $true
+          $config.Output.Verbosity = 'Detailed'
+          $config.TestResult.Enabled = $true
+          $config.TestResult.OutputPath = 'testresults.xml'
+          Invoke-Pester -Configuration $config
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pester-results
+          path: testresults.xml

@@ -41,7 +41,7 @@ agent workflows.
 ### What's a good first contribution?
 
 Look for issues labelled [`good first issue`](https://github.com/SteCiu01/Power-Platform-Workspace-One-Click-Setup/labels/good%20first%20issue)
-or check the [current status table in the README](README.md#current-status-v010-preview)
+or check the [current status table in the README](README.md#current-status-v030)
 for areas marked "Not yet".
 
 Some ideas:

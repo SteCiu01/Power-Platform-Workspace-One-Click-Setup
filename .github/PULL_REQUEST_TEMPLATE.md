@@ -19,7 +19,8 @@ Closes # (issue number, if applicable)
 Describe how you verified your changes work:
 
 - [ ] Ran `Setup-PowerPlatformWorkspace.bat` on a clean folder
-- [ ] Tested in VS Code with Copilot Chat and the agent
+- [ ] Tested in VS Code with Copilot Chat and the agents
+- [ ] Ran the Pester suite (`tests/Run-Tests.bat`) and it passed
 - [ ] Tested on PowerShell 5.1
 - [ ] Tested on PowerShell 7+
 - [ ] Other (describe):

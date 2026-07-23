@@ -5,16 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [v0.3.0] - 2026-07-23
 
-_Nothing yet — next changes will appear here._
+A structural release that turns the single Power Platform Master Agent into a
+governed **12-agent hierarchy**, generated from an embedded, schema-validated
+manifest — and makes the installer **authoritative and self-pruning**, in parity
+with the Fabric Agentic Workspace installer. Everything the installer ships is
+force-refreshed on every update; anything the user creates is never touched.
+
+### Added
+
+- **12-agent hierarchy, manifest-driven** — the installer now embeds a JSON agent manifest (validated against the new `schema/agent-manifest.schema.json`) and generates one `.agent.md` per entry with a 3-digit, hierarchy-sorted filename prefix. The team: **4 executives** (`000` Power Platform Master, `001` Solution Architect, `002` Integration QA & Change Controller, `003` Workspace Maintainer) and **8 Team Leads** (`010`–`080`: Canvas Apps, Power Automate, Power Pages, Code Apps, Model Apps, Mobile Apps, MCP Apps, Solution ALM & Environments). All are visible and user-invocable; the Master coordinates and delegates rather than implementing directly
+- **Least-privilege capability model** — every agent declares an explicit `tools` array drawn from a fixed set (`agent`, `read`, `search`, `execute`, `edit`); the manifest default is read-only (`read`, `search`). The **Master** (delegates to all 11 other agents) and the **Solution Architect** (can call the 8 Team Leads for advisory planning) hold the `agent` tool; the **8 Team Leads** are the leaf executors that carry `execute`/`edit` and do the actual building (no direct reports); and the advisory/gate roles (Solution Architect, Integration QA & Change Controller) are never granted `edit`
+- **Second MCP server: `flow-agent`** — the Power Automate Lead can drive the Power Automate MCP server (Node.js 18+), registered in `.vscode/mcp.json` alongside the existing `canvas-authoring` server. Step 2 auto-installs Node.js by default (non-blocking)
+- **CI-friendly generation & integrity modes** — `-EmitAgentsTo <dir>` generates the workspace non-interactively (no prereq checks, cloning, or launch) and runs a post-generation self-test; `-VerifyRoot <dir>` re-hashes managed files against `.github/installed-manifest.json` (SHA256) to detect drift. The installer also writes `tool-status.json` and `guardrail-status.json`
+- **Pester test suite + GitHub Actions** — `tests/` guards the manifest contract, hierarchy, tool posture, version consistency, and the real generator output; `.github/workflows/validate.yml` runs it on every push/PR
+- **`CLI-FUNCTIONALITIES.md`** — a reference mapping each CLI the workspace drives (`pac`, `az`, `dnx`, `node`) to the agents and workflows that use it
+- **Self-pruning updates** — the `installed-manifest.json` is an authoritative **write-log** (the exact set of files the installer wrote, never a directory scan). On update, files an earlier version shipped but the current one no longer ships are **removed automatically** by diffing the previous write-log against the new one, scoped to managed roots (`.github/agents/`, `.github/skills/`, `.github/agent-docs/`, `.vscode/`, `scripts/`) with an allow-list. A separate legacy-orphan sweep removes pre-manifest artefacts (`.github/hooks/`, `.github/copilot/`, `.session-active`) that can leak environment identifiers
+- **Vendor force-refresh** — a new `Update-VendorClone` helper fetches + prunes, stashes any local edits (recoverable via `git stash list`), then `reset --hard origin/HEAD`, so the `power-platform-skills` clone always mirrors published upstream
+
+### Changed
+
+- **Live-authoring runtimes install by default** — Step 2 auto-installs **Node.js 18+** (for the Power Automate `flow-agent` MCP) and the **Azure CLI** (`az login` auth for the flow MCP, plus repoint `appId` resolution) by default, matching how the **.NET 10 SDK** is installed for the `canvas-authoring` MCP (previously Node.js was only detected and `az` was an opt-in `y/N` prompt). The Azure CLI install uses a resilient two-stage pattern: **winget** first (per-machine MSI, works on most PCs), then an **isolated-venv `pip install`** no-admin fallback for locked-down machines where winget is blocked (exit 1603). All are **non-blocking** — if any can't be installed, offline authoring via `pac` still works and setup completes
+- **`copilot-instructions.md` and `AGENTS.md` are now hierarchy-aware** — they describe the full team, delegation flow, and how to start with `000 - Power Platform Master`
+- **Managed files are authoritative** — the `power-platform-skills` clone is **force-refreshed** to upstream on update (not fast-forward-only). The `003` Workspace Maintainer agent enforces the authoritative-overwrite contract: it explains that edits to managed files reset on update and steers customisation into **NEW** files under `.github/`, rather than preserving edits as conflicts
+- **Machine-specific files excluded from integrity** — `tool-status.json`, `guardrail-status.json`, and `installed-manifest.json` are `.gitignore`d and excluded from the hashed manifest, so `-VerifyRoot` no longer reports false drift from regenerated, environment-specific files
+- **Self-test is all-managed-present, not exact-count** — the post-generation self-test asserts every managed agent was written and reports any extra user-authored agents as preserved, instead of failing when the user adds an agent
+- **Version is single-sourced** — `$productVersion` in the installer and `productVersion` in the embedded manifest are both `0.3.0`; the Pester suite fails the build if they drift from the README status heading or this changelog
 
 ## [v0.2.2-pre-release] - 2026-06-26
 
 ### Added
 
 - **Cross-environment repoint workflow added to the `pbi-powerapps-integration` skill** — the embedded skill now carries an end-to-end, A-to-Z playbook for repointing a Power BI report's Power Apps and Power Automate (Flow) visuals across DevOps branches (`dev → stage → prod`): read-only discovery of the visuals, a DEV-confirmation gate, resolving each target environment's live ids from Power Platform (the Dataverse `canvasapps.canvasappid` *is* the visual's `appId`; the Flow GUID is solution-aware and identical across environments while only the `EnvironmentId` changes), hardcoding the correct `appId` / `EnvironmentId` per branch, and a verification pass. The agent's copilot-instructions and working-flow skill discovery now point at it for "repoint / lock the app & flow ids per environment" tasks
-- **Optional Azure CLI (`az`) install prompt** — Step 2 now detects Azure CLI and, only if it's missing, offers a one-time opt-in install (`y/N`, defaults to skip) via winget. `az` is used solely by the repoint workflow above to auto-resolve a Power Apps visual's live `appId` from Dataverse; if you decline or winget is unavailable, the installer points you to [aka.ms/installazurecli](https://aka.ms/installazurecli) and everything else still works.
+- **Optional Azure CLI (`az`) install prompt** — Step 2 now detects Azure CLI and, only if it's missing, offers a one-time opt-in install (`y/N`, defaults to skip) via winget. `az` is used solely by the repoint workflow above to auto-resolve a Power Apps visual's live `appId` from Dataverse; if you decline or winget is unavailable, the installer points you to [aka.ms/installazurecli](https://aka.ms/installazurecli) and everything else still works. 
 
 ## [v0.2.1-pre-release] - 2026-06-24
 
@@ -24,7 +48,7 @@ _Nothing yet — next changes will appear here._
 
 ### Added
 
-- **Per-session setup reset via SessionStart hook** — the installer now generates `.github/hooks/clear-session.json`, a workspace `SessionStart` hook that clears the `.session-active` marker at the start of each new agent session, so the guided setup is offered once per session instead of only once after install
+- **Conversation-state session routing** — the Master agent decides whether guided setup has already run by inspecting the current conversation, not a filesystem marker. There is no `.session-active` file and no SessionStart hook (VS Code does not fire workspace `SessionStart` hooks reliably); the guided setup is offered once per chat and skipped thereafter within that same conversation
 - **`[S] set me up` / `[W] just work` startup choice** — on a fresh session the agent now asks whether to run the full guided setup or jump straight to work with a lightweight, lazy init (confirms sign-in and environment, prompts only if missing), reducing first-turn friction
 - **Power Platform Tools extension auto-install (optional)** — Step 2 now detects the Power Platform Tools VS Code extension and installs it via `code --install-extension` when absent (non-blocking); all six prerequisites now print an explicit green confirmation when present
 - **Custom embedded skill `pbi-powerapps-integration`** — the installer now writes a maintainer-authored, house-style skill to `.github/skills/pbi-powerapps-integration/SKILL.md` (committed, not gitignored) so it auto-installs and stays current on every run. It covers canvas apps embedded in Power BI via the Power Apps visual: the `PowerBIIntegration.Data` / `.Refresh()` API, the golden rule that field-well changes must be re-edited from the Power BI Service, the 1000-row limit, and a stale-schema troubleshooting playbook. The agent (copilot-instructions, starting flow, and working-flow skill discovery) now reads it first and treats it as authoritative over the cloned canvas-apps skills where they overlap
