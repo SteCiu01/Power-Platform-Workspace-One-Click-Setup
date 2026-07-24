@@ -44,6 +44,26 @@ if (-not $EmitAgentsTo -and -not $VerifyRoot) {
     }
 }
 
+# -- Helper: SHA-256 hex, resilient across PowerShell hosts -------------
+# Get-FileHash ships in Microsoft.PowerShell.Utility. When a Windows PowerShell
+# 5.1 child is launched from PowerShell 7 (as the CI Pester runner does in
+# Generated.Tests.ps1), the inherited PSModulePath can leave Get-FileHash
+# unresolved, which - under $ErrorActionPreference='Stop' - aborts emit/verify
+# mode with a non-zero exit. Fall back to the .NET SHA-256 implementation so
+# hashing never depends on module autoloading. Returns lower-case hex.
+function Get-Sha256Hex ([string]$LiteralPath) {
+    if (Get-Command Get-FileHash -ErrorAction SilentlyContinue) {
+        return (Get-FileHash -LiteralPath $LiteralPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [System.IO.File]::ReadAllBytes($LiteralPath)
+        return ([System.BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant()
+    } finally {
+        $sha.Dispose()
+    }
+}
+
 # =====================================================================
 # -VerifyRoot : integrity check against .github/installed-manifest.json
 # =====================================================================
@@ -62,7 +82,7 @@ if ($VerifyRoot) {
             $drift += "MISSING: $($entry.path)"
             continue
         }
-        $actual = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
+        $actual = Get-Sha256Hex -LiteralPath $target
         if ($actual -ne $entry.sha256.ToLowerInvariant()) {
             $drift += "CHANGED: $($entry.path)"
         }
@@ -2488,7 +2508,7 @@ $manifestFiles = @()
 foreach ($rel in $managedRelFiles) {
     $full = Join-Path $rootPath $rel
     if (Test-Path -LiteralPath $full -PathType Leaf) {
-        $manifestFiles += [ordered]@{ path = $rel; sha256 = (Get-FileHash -LiteralPath $full -Algorithm SHA256).Hash.ToLowerInvariant() }
+        $manifestFiles += [ordered]@{ path = $rel; sha256 = Get-Sha256Hex -LiteralPath $full }
     }
 }
 $newManifestPaths = @($manifestFiles | ForEach-Object { $_.path })
