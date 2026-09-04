@@ -33,6 +33,7 @@ authentication, environment sync, and solution management for you.
   - [4. Keeping it up to date](#4-keeping-it-up-to-date)
 - [What the agents can do](#what-the-agents-can-do)
   - [The team — who does what](#the-team--who-does-what)
+  - [Dynamic worker sub-agent discovery](#dynamic-worker-sub-agent-discovery)
   - [Automated session startup](#automated-session-startup)
   - [Day-to-day commands](#day-to-day-commands)
   - [Skill-based development](#skill-based-development)
@@ -42,7 +43,7 @@ authentication, environment sync, and solution management for you.
 - [Workspace structure](#workspace-structure)
 - [How it works under the hood](#how-it-works-under-the-hood)
 - [FAQ](#faq)
-- [Current status (v0.3.0)](#current-status-v030)
+- [Current status (v0.4.0)](#current-status-v040)
 - [Contributing](#contributing)
 - [Files in this repository](#files-in-this-repository)
 - [License](#license)
@@ -103,7 +104,7 @@ Copilot Chat panel, guided by Microsoft's official [power-platform-skills](https
 
 | Component | Description |
 |---|---|
-| **Agent team (12 agents)** | A hierarchy of custom Copilot Chat agents: 4 executives (**Power Platform Master**, **Solution Architect**, **Integration QA & Change Controller**, **Workspace Maintainer**) + 8 topic **Team Leads** (Canvas Apps, Power Automate, Power Pages, Code Apps, Model Apps, Mobile Apps, MCP Apps, Solution ALM & Environments). The Master coordinates and delegates; the Leads build and edit through natural language |
+| **Agent team (12 agents)** | A hierarchy of custom Copilot Chat agents: 4 executives (**Power Platform Master**, **Solution Architect**, **Integration QA & Change Controller**, **Workspace Maintainer**) + 8 topic **Team Leads** (Canvas Apps, Power Automate, Power Pages, Code Apps, Model Apps, Mobile Apps, MCP Apps, Solution ALM & Environments). The Master coordinates and delegates; the Leads build and edit through natural language. Each Lead also **auto-discovers Microsoft's own bundled worker agents** from the cloned skills (hidden, delegated sub-agents — see [dynamic discovery](#dynamic-worker-sub-agent-discovery)) |
 | **Microsoft Power Platform Skills** | Git-cloned from [microsoft/power-platform-skills](https://github.com/microsoft/power-platform-skills) — no npm install or admin rights required (see [FAQ](#faq)) |
 | **Custom embedded skill** | `pbi-powerapps-integration` — a maintainer-authored, house-style skill (committed in `.github/skills/`) for canvas apps embedded in Power BI via the Power Apps visual, written from a real production incident |
 | **Live authoring MCP servers** | `.vscode/mcp.json` registers the **Canvas Authoring** server (real-time canvas coauthoring via `dnx` / .NET 10) and the **Power Automate FlowAgent** server (Node.js 18+, authenticated with `az login`). The installer auto-installs both runtimes by default; the servers start on demand |
@@ -258,6 +259,32 @@ Every agent has a single, well-defined job and only the tools it needs for it. Y
 | **080** | **Solution ALM & Environments Lead** | Owns solution lifecycle and environments via `pac` CLI: init/export/unpack/pack/import, publisher setup, environment selection and cross-environment promotion — Production imports gated on explicit confirmation. | Delegate · Read · Search · Run · Edit | — (works `pac` CLI directly; Copilot Studio topics + Dataverse schema also handled here) |
 
 > **Copilot Studio topics** and **Dataverse schema** have no dedicated Microsoft skill yet, so they're edited from unpacked solution source — routed by the Master and handled with the ALM Lead's `pac` tooling. See the [honest scope note](#day-to-day-commands) above.
+
+### Dynamic worker sub-agent discovery
+
+Microsoft has started shipping its own **bundled worker agents** inside the skills
+repo — small, focused agents that a skill orchestrates (for canvas apps today:
+`canvas-app-planner` and `canvas-screen-builder`, which the `canvas-app` skill
+dispatches to plan then build screens). They live at
+`power-platform-skills/plugins/<plugin>/agents/*.md`.
+
+Rather than fork or copy them, this workspace **discovers them automatically**. After
+every skills clone/refresh, the installer scans each Lead's plugin and generates a
+**hidden, delegated sub-agent** (`user-invocable: false`) for each Microsoft worker,
+wired into the owning Lead so the Lead can dispatch it. The wrapper is a thin pointer:
+it tells the sub-agent to **read Microsoft's file verbatim** and carries only that
+worker's own tool/MCP permissions — Microsoft stays the single source of truth.
+
+- **Zero maintenance** — new upstream workers are picked up on the next refresh; ones
+  Microsoft removes are pruned. Nothing to hand-author.
+- **Hidden by design** — the workers never clutter your agent dropdown; you still talk
+  to **Power Platform Master**, which routes to a Lead, which dispatches the workers.
+- **Stable orchestration, refreshed implementation** — your 12-agent team is the
+  durable layer; Microsoft's workers are the layer that evolves with the skills.
+
+Today only the **Canvas Apps Lead** lights up (the only plugin shipping workers so
+far); every other Lead activates automatically the moment Microsoft adds an `agents/`
+folder for its plugin.
 
 ### Automated session startup
 
@@ -442,7 +469,8 @@ Power Platform/
 │   │   ├── 001-solution-architect.agent.md        ← advisory planning (read-only)
 │   │   ├── 002-integration-qa-change-controller.agent.md ← review + Prod gate
 │   │   ├── 003-workspace-maintainer.agent.md      ← keeps skills/MCP healthy
-│   │   └── 010-080-*-lead.agent.md                ← 8 topic Team Leads
+│   │   ├── 010-080-*-lead.agent.md                ← 8 topic Team Leads
+│   │   └── 0NN-sub-*.agent.md                     ← Microsoft worker sub-agents (hidden, auto-discovered)
 │   ├── agent-docs/
 │   │   ├── starting-flow.md                        ← guided first-session setup flow
 │   │   ├── working-flow-reference.md               ← day-to-day working reference
@@ -555,12 +583,13 @@ run `git -C power-platform-skills pull` manually.
 
 ---
 
-## Current status (v0.3.0)
+## Current status (v0.4.0)
 
 | Area | Status |
 |---|---|
 | One-click setup (.bat + .ps1) | **Working** — tested on Windows 10/11 |
-| 12-agent hierarchy (Master → Architect / Team Leads) | **New in v0.3.0** — generated from an embedded, schema-validated manifest |
+| 12-agent hierarchy (Master → Architect / Team Leads) | **Working** — generated from an embedded, schema-validated manifest |
+| Dynamic Microsoft worker sub-agents (auto-discovered per Lead, hidden) | **New in v0.4.0** — each Lead gains Microsoft's bundled plugin workers as hidden delegated sub-agents, refreshed with the skills clone (no fork) |
 | Agent session flow (auth → env → inventory → sync) | **Working** — tested daily |
 | Pull / push / compare / status commands | **Working** |
 | Skill-based editing via local SKILL.md files | **Working** — agents read and follow instructions from the cloned repo |

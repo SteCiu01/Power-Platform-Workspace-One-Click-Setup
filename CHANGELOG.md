@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.4.0] - 2026-08-31
+
+Adds **dynamic worker sub-agent discovery**: each Team Lead now automatically gains
+Microsoft's own bundled worker agents (shipped inside the cloned
+`power-platform-skills` plugins) as **hidden, delegated sub-agents** — with zero
+forking. The stable 12-agent team stays the orchestration layer; Microsoft's
+refreshed workers are the implementation layer.
+
+### Added
+
+- **Dynamic worker sub-agent discovery** — after the skills clone/refresh, the installer scans each Lead's plugin at `power-platform-skills/plugins/<plugin>/agents/*.md` and generates **one hidden wrapper agent per Microsoft worker** in `.github/agents/`, wired into the owning Lead's `agents:` list so the Lead can dispatch it as a VS Code subagent. Today this lights up the **Canvas Apps Lead** with Microsoft's `canvas-app-planner` and `canvas-screen-builder`; every other Lead activates automatically the moment Microsoft ships an `agents/` folder for its plugin — no installer change required
+- **Pointer, not fork** — each wrapper is a thin `user-invocable: false` agent whose body tells the sub-agent to read Microsoft's file **verbatim** and resolve `${PLUGIN_ROOT}` to the plugin folder. Microsoft stays the single source of truth; wrappers carry only the worker's own tool/MCP permissions (read-only workers stay read-only)
+- **Self-refreshing & self-pruning** — new upstream workers are picked up on every refresh; wrappers for workers Microsoft removed are pruned. Wrappers use a `-sub-` filename marker so pruning never touches the 12 core agents
+- **Collision-safe naming** — each wrapper's registered agent name is namespaced with its Lead's numeric prefix (e.g. `030-data-model-architect`), so when two plugins ship a worker with the same name (Microsoft's `data-model-architect` exists under both power-pages and mobile-apps) they never clash in `.github/agents/`, and each Lead only ever dispatches its own worker
+- **Discovery test suite** — `tests/Discovery.Tests.ps1` stages a fake plugin and proves wrapper generation, hidden visibility, Lead wiring, tool mirroring, self-pruning, and cross-plugin name-collision safety through the real generator (dry-run mode, no network)
+
+### Changed
+
+- **The team is now "12 core agents + auto-discovered Microsoft worker sub-agents (hidden, per Lead)"** — the 12-agent hierarchy and the Master → Lead delegation are unchanged; the discovered workers add a hidden implementation layer beneath the Leads
+- **Version bumped to `0.4.0`** across the installer stamp, embedded manifest, README status heading, and this changelog
+
 ## [v0.3.0] - 2026-07-23
 
 A structural release that turns the single Power Platform Master Agent into a

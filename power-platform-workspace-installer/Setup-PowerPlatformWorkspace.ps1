@@ -31,7 +31,7 @@ param(
 )
 
 # Product version - single source of truth (mirrors the manifest productVersion).
-$productVersion = '0.3.0'
+$productVersion = '0.4.0'
 
 # Keep the window open on any error so the user can read it (interactive mode
 # only - emit / verify modes must stay non-interactive for CI).
@@ -199,7 +199,7 @@ function Update-VendorClone ([string]$RepoPath, [string]$Label) {
 $agentManifestJson = @'
 {
   "schemaVersion": 1,
-  "productVersion": "0.3.0",
+  "productVersion": "0.4.0",
   "defaults": {
     "mode": "both",
     "tools": ["read", "search"],
@@ -742,6 +742,143 @@ should know about.
     }
     [void]$sb.AppendLine('')
     return $sb.ToString()
+}
+
+# =====================================================================
+# DYNAMIC WORKER SUB-AGENT DISCOVERY
+# ---------------------------------------------------------------------
+# Microsoft ships its own bundled worker agents inside each plugin at
+# power-platform-skills/plugins/<plugin>/agents/*.md (e.g. canvas-app-planner,
+# canvas-screen-builder). We do NOT fork them. After the skills clone/refresh we
+# scan each Lead's plugin, and for every worker we generate a HIDDEN wrapper agent
+# in .github/agents/ that simply tells a sub-agent to read Microsoft's file
+# verbatim (resolving ${PLUGIN_ROOT} to the plugin folder). Each wrapper is wired
+# into its owning Lead's `agents:` list so the Lead can dispatch it as a subagent.
+# New upstream workers are picked up automatically on the next refresh; wrappers
+# for workers Microsoft removed are pruned. Emit/dry-run mode never clones, so this
+# is a no-op there (and existing tests keep seeing exactly the 12 core agents).
+
+# Parse a Microsoft worker's YAML front matter for its name and whether it writes
+# files (so the wrapper mirrors read-only vs edit intent).
+function Read-WorkerFrontmatter ([string]$Path, [string]$FallbackName) {
+    $name = $FallbackName
+    $canEdit = $false
+    try {
+        $inFm = $false; $inTools = $false
+        foreach ($ln in [System.IO.File]::ReadAllLines($Path)) {
+            if ($ln -match '^\s*---\s*$') { if (-not $inFm) { $inFm = $true; continue } else { break } }
+            if (-not $inFm) { continue }
+            if ($ln -match '^\s*name\s*:\s*(.+?)\s*$') { $name = $Matches[1].Trim().Trim('"').Trim("'") }
+            if ($ln -match '^\s*tools\s*:') { $inTools = $true; if ($ln -match '(?i)(edit|write|create)') { $canEdit = $true }; continue }
+            if ($inTools) {
+                if ($ln -match '^\s*-\s') { if ($ln -match '(?i)(edit|write|create)') { $canEdit = $true } }
+                elseif ($ln -match '^\S') { $inTools = $false }
+            }
+        }
+    } catch { }
+    return [pscustomobject]@{ Name = $name; CanEdit = $canEdit }
+}
+
+# Build one hidden wrapper .agent.md that points at (never copies) a Microsoft worker.
+function New-WorkerWrapperContent ([string]$RegisteredName, [string]$WorkerName, [string]$Plugin, [string]$WorkerRelPath, [bool]$CanEdit, [string[]]$McpServers) {
+    $tools = @('read', 'search')
+    if ($CanEdit) { $tools += 'edit' }
+    foreach ($m in $McpServers) { if ($m) { $tools += "$m/*" } }
+    $toolsYaml = ConvertTo-AgentYamlList $tools
+    $nameEsc = $RegisteredName -replace "'", "''"
+    $descEsc = ("Microsoft $Plugin worker '$WorkerName' - runs its authoritative bundled procedure. Dispatched by its Team Lead; not user-invocable.") -replace "'", "''"
+    $fm = "---`nname: '$nameEsc'`ndescription: '$descEsc'`nuser-invocable: false`ntools: $toolsYaml`nagents: []`n---`n`n"
+    $tpl = @'
+# %%NAME%% - Microsoft %%PLUGIN%% worker (delegated)
+
+You are a hidden worker sub-agent dispatched by your Team Lead. Your authoritative
+instructions are Microsoft's own bundled agent definition in the cloned skills repo -
+follow them verbatim and never fork, summarise, or improvise them.
+
+## Procedure
+
+1. Read your instruction file in full and do exactly what it says:
+   `%%WORKERPATH%%`
+2. That file is written for a plugin runtime. Wherever it refers to `${PLUGIN_ROOT}`,
+   resolve it to `%%PLUGINROOT%%`
+   (so `${PLUGIN_ROOT}/references/Foo.md` means `%%PLUGINROOT%%/references/Foo.md`).
+3. Read every guide, template, and reference it points to before you act.
+4. Stay within the tool and MCP permissions Microsoft defined for this worker; do not
+   request anything broader.
+5. If the instruction file is missing, stop and report that `power-platform-skills`
+   needs a refresh (ask the Workspace Maintainer) instead of guessing.
+
+## Return contract
+
+Return exactly the hand-off Microsoft's worker definition specifies (its plan, its
+screen file + QA line, etc.) plus the list of files you touched. Do not delegate
+further.
+'@
+    $body = $tpl.Replace('%%NAME%%', $WorkerName).Replace('%%PLUGIN%%', $Plugin).Replace('%%WORKERPATH%%', $WorkerRelPath).Replace('%%PLUGINROOT%%', "power-platform-skills/plugins/$Plugin")
+    return $fm + $body
+}
+
+# Build the per-Lead discovery descriptors from the manifest (Lead -> its plugins).
+function Get-DiscoveryLeadDescriptors ($OrderedAgents, $ThreeDigitById) {
+    $out = @()
+    foreach ($a in $OrderedAgents) {
+        if ($a.level -ne 'team-lead') { continue }
+        $plugins = @($a.primarySkills) | Where-Object { $_ }
+        if ($plugins.Count -eq 0) { continue }
+        $prefix = $ThreeDigitById[$a.id]
+        $file = [string]$a.filename -replace '^\d+', $prefix
+        $out += [pscustomobject]@{ Prefix = $prefix; File = $file; McpServers = @($a.mcpServers); Plugins = $plugins }
+    }
+    return , $out
+}
+
+# Scan plugins, (re)generate hidden wrappers, wire each into its Lead, prune stale.
+# Wrapper filenames use a "<leadPrefix>-sub-<slug>.agent.md" marker so pruning only
+# ever touches discovery-generated files, never the 12 core agents. Returns a summary.
+function Invoke-WorkerAgentDiscovery ([string]$WorkspaceRoot, $Leads) {
+    $pluginsRoot = Join-Path $WorkspaceRoot 'power-platform-skills\plugins'
+    $agentsDir   = Join-Path $WorkspaceRoot '.github\agents'
+    $res = [pscustomobject]@{ Skipped = $true; Wrappers = @(); LeadWorkers = @{} }
+    if (-not (Test-Path -LiteralPath $pluginsRoot)) { return $res }
+    $res.Skipped = $false
+    if (-not (Test-Path -LiteralPath $agentsDir)) { New-Item -ItemType Directory -Path $agentsDir -Force | Out-Null }
+
+    $wanted = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($lead in $Leads) {
+        $names = @()
+        foreach ($plugin in $lead.Plugins) {
+            $agentsFolder = Join-Path $pluginsRoot (Join-Path $plugin 'agents')
+            if (-not (Test-Path -LiteralPath $agentsFolder)) { continue }
+            foreach ($wf in @(Get-ChildItem -LiteralPath $agentsFolder -Filter '*.md' -File -ErrorAction SilentlyContinue)) {
+                $info = Read-WorkerFrontmatter $wf.FullName $wf.BaseName
+                $workerName = $info.Name
+                $slug = ($workerName.ToLowerInvariant() -replace '[^a-z0-9]+', '-').Trim('-')
+                if (-not $slug) { continue }
+                $wrapperFile = "$($lead.Prefix)-sub-$slug.agent.md"
+                $registered = "$($lead.Prefix)-$slug"
+                $workerRel = "power-platform-skills/plugins/$plugin/agents/$($wf.Name)"
+                $content = New-WorkerWrapperContent $registered $workerName $plugin $workerRel ([bool]$info.CanEdit) @($lead.McpServers)
+                Write-ManagedFile (Join-Path $agentsDir $wrapperFile) $content
+                [void]$wanted.Add($wrapperFile)
+                $res.Wrappers += ".github\agents\$wrapperFile"
+                if ($names -notcontains $registered) { $names += $registered }
+            }
+        }
+        if ($names.Count -gt 0) {
+            $res.LeadWorkers[$lead.Prefix] = $names
+            $leadPath = Join-Path $agentsDir $lead.File
+            if (Test-Path -LiteralPath $leadPath) {
+                $raw = [System.IO.File]::ReadAllText($leadPath)
+                $agentsLine = 'agents: ' + (ConvertTo-AgentYamlList $names)
+                $patched = ([regex]'(?m)^agents:.*$').Replace($raw, { param($m) $agentsLine }, 1)
+                Write-ManagedFile $leadPath $patched
+            }
+        }
+    }
+    foreach ($f in @(Get-ChildItem -LiteralPath $agentsDir -Filter '*-sub-*.agent.md' -File -ErrorAction SilentlyContinue)) {
+        if (-not $wanted.Contains($f.Name)) { Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue }
+    }
+    return $res
 }
 
 $totalSteps = 8
@@ -2611,6 +2748,10 @@ if ($selfTest.Count -eq 0) {
 
 # In emit mode we are done: exit 0 on a clean self-test, 1 otherwise.
 if ($EmitAgentsTo) {
+    # If a skills clone was staged into the emit dir, exercise discovery too so the
+    # Pester suite can validate wrapper generation without a network clone. No skills
+    # staged (the normal CI case) => no-op, so the 12-core assertions are unaffected.
+    [void](Invoke-WorkerAgentDiscovery $rootPath (Get-DiscoveryLeadDescriptors $orderedAgents $threeDigitById))
     if ($selfTest.Count -eq 0) { Write-Host "[emit mode] Generation OK." -ForegroundColor Green; exit 0 }
     else { Write-Host "[emit mode] Generation FAILED self-test." -ForegroundColor Red; exit 1 }
 }
@@ -2647,6 +2788,18 @@ try {
         }
     } else {
         Write-Host "  power-platform-skills/ already exists - skipping clone." -ForegroundColor Green
+    }
+
+    # -- Dynamic worker sub-agent discovery ----------------------------
+    # Scan each Lead's plugin for Microsoft's bundled worker agents and generate a
+    # hidden wrapper per worker, wired into the owning Lead. Picks up new upstream
+    # workers automatically on every refresh and prunes ones Microsoft removed.
+    # No-op when no plugins are cloned (offline first run).
+    $disc = Invoke-WorkerAgentDiscovery $rootPath (Get-DiscoveryLeadDescriptors $orderedAgents $threeDigitById)
+    if (-not $disc.Skipped) {
+        $wc = @($disc.Wrappers).Count
+        if ($wc -gt 0) { Write-Host "  Wired $wc Microsoft worker sub-agent(s) into their Team Leads (hidden, auto-discovered)." -ForegroundColor Green }
+        else { Write-Host "  No bundled worker agents in the current skills - Leads run their skills directly." -ForegroundColor DarkGray }
     }
 
     Read-Host "`n  Press Enter to continue..."
