@@ -5,6 +5,114 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.5.0] - 2026-09-14
+
+Fine-tunes the delegation model so the three-tier team (Master → Team Lead →
+Microsoft worker) runs end to end, gives every agent its own specialist knowledge,
+hardens the vendor refresh, and makes startup lean. Same principles and vocabulary as
+the Fabric twin's v0.7.0, adapted to the Power Platform domain.
+
+### Fixed
+
+- **Nested delegation now enabled** — VS Code keeps subagent → subagent calls off by
+  default (`chat.subagents.allowInvocationsFromSubagents` = false), so a Team Lead dispatched
+  by the Master could not reach its Microsoft workers. The installer now writes the setting
+  (forced `true`) into `.vscode/settings.json` **and** into a managed `<folder>.code-workspace`
+  that it opens VS Code from — the key is window-scoped, so in a multi-root window only the
+  workspace file (or user settings) counts. The status script checks it every session
+  and every delegating agent carries a *dispatch health* rule that names this exact cause
+- **Worker permissions mirror Microsoft's** — wrappers previously took their Lead's MCP
+  grant. They now mirror the worker's **own** `tools:` list (`mcp__x__y` / `x/y` → `x/*`,
+  `Write`/`Edit` → `edit`, `Bash` → `execute`); a builder Microsoft gave no MCP tools gets
+  none. The Discovery test now asserts this
+- **`.github\hooks` left alone** — the legacy-orphan cleanup no longer removes this folder,
+  which VS Code now uses for user hooks. Only `.github\copilot` and `.session-active` are
+  still purged
+- **Vendor refresh made observable** — `Update-VendorClone` discards git's stderr with
+  `2>$null` (a `2>&1` under `$ErrorActionPreference = 'Stop'` can abort the reset silently),
+  checks `$LASTEXITCODE`, falls back to `reset --hard '@{upstream}'`, and prints
+  `refreshed: <old> -> <new>` / `already at upstream`. New `tests/VendorClone.Tests.ps1`
+  proves it on a local bare repo (no network)
+- **Update commit** now compares `HEAD` before/after instead of relying on `$LASTEXITCODE`
+- **Managed-file reference** — `copilot-instructions.md` no longer cites
+  `schema/agent-manifest.schema.json`, which lives in this repo rather than the generated
+  workspace
+
+### Added
+
+- **Team protocol** in `working-flow-reference.md` and every agent: `WORK ORDER`
+  (goal, artifact, mode, constraints, validation expected, approvals granted, context) →
+  `WORK RESULT` (`DONE | DONE WITH RISKS | NEEDS APPROVAL | NEEDS INPUT | NEEDS ARCHITECT |
+  OUT OF SCOPE | FAILED`); the Architect returns a **PLAN**, QA a **VERDICT**; the Master
+  runs **three loops** (Simple / Designed / Blocked) and keeps a **session ledger**
+- **Approval tokens** — destructive or shared-environment actions need a literal
+  `APPROVED:<ACTION>:<artifact>` (Production import keeps `confirm push to prod`).
+  Plain-words "do it now" is not a token; workers without one stop and return
+  `NEEDS APPROVAL`; only the agent the user selected can ask. Microsoft's mid-build
+  plan approvals ride the same channel instead of telling the user to switch agents
+- **Specialist agents** — a knowledge catalog (`$agentKnowledge`) renders per-agent
+  `## Knowledge and skills` (paths resolved against the real clone at install time;
+  renamed upstream folders self-heal, missing ones get a *re-discover by keyword* hint),
+  `## Playbook`, `## Validation you must run before reporting`, `## Tool ladder` and
+  `## Avoid`; keyword matching against an index of every upstream `SKILL.md` appends
+  *"Also relevant – auto-discovered"* skills so new Microsoft additions attach on the
+  next run without a catalog edit
+- **Leads know their team** — discovery injects a `## Your team` table (dispatch name →
+  Microsoft name → tools → definition file) between `<!-- team-roster -->` markers and a
+  `## How you dispatch` section; Microsoft's `SKILL.md` says "invoke
+  `canvas-screen-builder`", the Lead dispatches `010-canvas-screen-builder`
+- **Lean worker contract** — wrappers tell the worker its WORK ORDER is the complete brief
+  (no startup, no flow docs), translate the Claude Code runtime (`Task`, `AskUserQuestion`,
+  `${PLUGIN_ROOT}`), carry the token rule, never delegate, and end with a WORK RESULT
+- **`Get-SessionStatus.ps1`** (managed, in the manifest) — one CWD-independent call prints
+  `ROOT / SKILLS / CONFIG / IDENTITY / ENV / TOOLS`: clone commit date and commits behind,
+  custom-skill date with a >30-day hint, skill locations (self-registers new plugin
+  folders), nested-dispatch check, active `pac auth` profile + environment URL (`az`
+  fallback), and a live tool re-check that rewrites `tool-status.json`
+- **Skills registered natively** — `Get-SkillContainerDirs` scans
+  `power-platform-skills/plugins/*/skills` and registers every container in
+  `chat.agentSkillsLocations` (plus `.github/skills`), so agents see the catalogue without
+  `ls`
+- **`microsoft-learn` MCP** (HTTP, no install) registered in `.vscode/mcp.json` and granted
+  to the Solution Architect and all eight Team Leads
+- **`power-apps-mobile-extension`** plugin (12 `.ppmplugin` skills) attached to the Mobile
+  Apps Lead
+- **Gated SYNC** capability — lists unmanaged, non-Microsoft solutions and pulls only what
+  the user picks (`APPROVED:SYNC:<env>` for more than one); replaces the startup
+  "pull every solution" phase
+- **Code-level Production gate** — `scripts/pac-workflows.ps1 push` to PROD requires
+  `-ConfirmProd`
+- **Maintenance handoff** button on the Master → `003 - Workspace Maintainer`, which now
+  offers light / deep maintenance when selected directly
+- **Tests 53 → 85** — generated-content assertions (Knowledge / Playbook / Validation,
+  WORK RESULT, token rule, Lead roster + dispatch-name rule, PLAN / VERDICT, three loops +
+  ledger, heading spacing, no unresolved managed refs), emitted-config assertions (nested
+  setting on in `settings.json` and the `.code-workspace`, skill locations, three MCP
+  servers, status script parses and is in the manifest, lean starting flow, gated SYNC,
+  `-ConfirmProd`), Discovery (own-tools mirroring, roster injection, placeholder for Leads
+  without workers, lean worker contract), `VendorClone.Tests.ps1`, and the `.bat` banner
+  version check
+
+### Changed
+
+- **Startup is lean** — `starting-flow.md` is now: classify, one status-script call, sign-in
+  / environment **only if missing**, MCP probed lazily by the owning Lead, straight to the
+  request. The `[S] set me up / [W] just work` menu, the inventory phase and the
+  sync-everything phase are gone; upstream freshness is a one-line hint, never a prompt
+- **Master** — the "Routing is invisible" rule and the "Degraded-mode direct dispatch"
+  fallback are retired (they worked around the nested-dispatch setting, which is now
+  written by the installer); the Master is the only voice to the user, confirms destructive
+  requests up front, and lists only its children in `agents:`
+- **Operating contract is tier-aware** — Master runs startup; executives and Leads follow
+  the working-flow reference and return open questions when dispatched; the
+  "read the plugin `AGENTS.md`" step is replaced by an explicit translation of the plugin
+  runtime's tool names (`Task`, `AskUserQuestion`, `${PLUGIN_ROOT}`)
+- **Installer step order** — the skills clone/refresh now runs **before** agent generation
+  (Step 4) so knowledge references resolve and worker discovery has one call site right
+  after the agents loop; the `.bat` banner and window title carry the version
+- **Version bumped to `0.5.0`** across the installer stamp, embedded manifest, README
+  status heading, `.bat` launcher, and this changelog
+
 ## [v0.4.0] - 2026-08-31
 
 Adds **dynamic worker sub-agent discovery**: each Team Lead now automatically gains

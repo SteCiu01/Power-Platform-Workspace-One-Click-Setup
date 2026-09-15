@@ -41,4 +41,15 @@ Describe 'Version single source of truth' {
         $ver = $script:Manifest.productVersion
         $changelog | Should -Match ([regex]::Escape("## [v$ver]")) -Because 'the newest CHANGELOG entry must document the current version'
     }
+
+    It '.bat launcher banner and window title match the installer version' {
+        $batPath = Join-Path (Split-Path $script:InstallerPath -Parent) 'Setup-PowerPlatformWorkspace.bat'
+        (Test-Path $batPath) | Should -BeTrue
+        $bat = Get-Content $batPath -Raw
+        $ver = $script:Manifest.productVersion
+        $bat | Should -Match ([regex]::Escape("One-click Setup v$ver")) -Because 'the banner the user sees first must show the current version'
+        $bat | Should -Match ([regex]::Escape("Setup v$ver")) -Because 'the console window title must show the current version'
+        # No other version string may linger in the launcher.
+        ([regex]::Matches($bat, 'v\d+\.\d+\.\d+') | ForEach-Object { $_.Value } | Sort-Object -Unique) | Should -Be @("v$ver")
+    }
 }

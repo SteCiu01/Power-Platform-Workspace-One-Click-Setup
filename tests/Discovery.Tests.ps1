@@ -35,20 +35,29 @@ BeforeAll {
     }
 
     function New-FakeWorker {
-        param([string]$Name, [switch]$ReadOnly)
-        $toolLines = if ($ReadOnly) { "  - Read`n  - Grep" } else { "  - Read`n  - Write`n  - Edit`n  - canvas-authoring/compile_canvas" }
+        param([string]$Name, [switch]$ReadOnly, [switch]$EditNoMcp, [switch]$PluginNamespacedLearn)
+        $toolLines = if ($ReadOnly) { "  - Read`n  - Grep" }
+                     elseif ($EditNoMcp) { "  - Read`n  - Write`n  - Edit" }
+                     elseif ($PluginNamespacedLearn) { "  - Read`n  - Edit`n  - Bash`n  - mcp__plugin_power-pages_microsoft-learn__microsoft_docs_search" }
+                     else { "  - Read`n  - Write`n  - Edit`n  - Bash`n  - mcp__canvas-authoring__compile_canvas`n  - canvas-authoring/list_controls" }
         return "---`nname: $Name`ndescription: >-`n  Fake $Name for tests.`ncolor: cyan`nuser-invocable: false`ntools:`n$toolLines`n---`n`n# $Name`n`nBody."
     }
 
     $script:Run = Invoke-EmitWithStagedWorkers @{
         'canvas-apps' = @{
             'canvas-app-planner'    = (New-FakeWorker -Name 'canvas-app-planner')
-            'canvas-screen-builder' = (New-FakeWorker -Name 'canvas-screen-builder' -ReadOnly)
+            'canvas-screen-builder' = (New-FakeWorker -Name 'canvas-screen-builder' -EditNoMcp)
+            'canvas-reviewer'       = (New-FakeWorker -Name 'canvas-reviewer' -ReadOnly)
+        }
+        'power-pages' = @{
+            'webapi-integration'    = (New-FakeWorker -Name 'webapi-integration' -PluginNamespacedLearn)
         }
     }
-    $script:PlannerWrapper = Join-Path $script:Run.AgentsDir '010-sub-canvas-app-planner.agent.md'
-    $script:BuilderWrapper = Join-Path $script:Run.AgentsDir '010-sub-canvas-screen-builder.agent.md'
-    $script:LeadFile       = Join-Path $script:Run.AgentsDir '010-canvas-apps-lead.agent.md'
+    $script:PlannerWrapper  = Join-Path $script:Run.AgentsDir '010-sub-canvas-app-planner.agent.md'
+    $script:BuilderWrapper  = Join-Path $script:Run.AgentsDir '010-sub-canvas-screen-builder.agent.md'
+    $script:ReviewerWrapper = Join-Path $script:Run.AgentsDir '010-sub-canvas-reviewer.agent.md'
+    $script:PagesWrapper    = Join-Path $script:Run.AgentsDir '030-sub-webapi-integration.agent.md'
+    $script:LeadFile        = Join-Path $script:Run.AgentsDir '010-canvas-apps-lead.agent.md'
 }
 
 AfterAll {
@@ -79,16 +88,46 @@ Describe 'Dynamic worker discovery - wrapper generation' {
         $planner | Should -Match '\$\{PLUGIN_ROOT\}'
     }
 
-    It 'mirrors Microsoft''s tool intent (edit worker gets edit + MCP; read-only stays read-only)' {
+    It 'mirrors the worker''s OWN tools, never the Lead''s MCP grants (least privilege)' {
+        # planner: Write/Edit + Bash + canvas-authoring MCP (two spellings) -> edit, execute, canvas-authoring/*
         $planner = Get-Content -LiteralPath $script:PlannerWrapper -Raw
         $planner | Should -Match "(?m)^tools:.*'edit'"
+        $planner | Should -Match "(?m)^tools:.*'execute'"
         $planner | Should -Match "(?m)^tools:.*'canvas-authoring/\*'"
+        # builder: Write/Edit but NO MCP tools of its own -> edit, and NOT the Lead's canvas-authoring grant
         $builder = Get-Content -LiteralPath $script:BuilderWrapper -Raw
-        $builder | Should -Not -Match "(?m)^tools:.*'edit'"
+        $builder | Should -Match "(?m)^tools:.*'edit'"
+        $builder | Should -Not -Match "(?m)^tools:.*canvas-authoring" -Because 'Microsoft gave this worker no MCP tools'
+        $builder | Should -Not -Match "(?m)^tools:.*'execute'"
+        # reviewer: Read/Grep only -> read + search, nothing else
+        $reviewer = Get-Content -LiteralPath $script:ReviewerWrapper -Raw
+        $reviewer | Should -Match "(?m)^tools: \['read', 'search'\]"
+        # canvas wrappers never inherit the Lead-only microsoft-learn grant
+        foreach ($w in @($planner, $builder, $reviewer)) { $w | Should -Not -Match 'microsoft-learn' }
+    }
+
+    It 'normalises Claude plugin-namespaced MCP names (plugin_<plugin>_<server>) to the registered server' {
+        # Microsoft's power-pages workers spell the Learn MCP as mcp__plugin_power-pages_microsoft-learn__...;
+        # our mcp.json registers it as microsoft-learn, so the grant must be microsoft-learn/*.
+        $pages = Get-Content -LiteralPath $script:PagesWrapper -Raw
+        $pages | Should -Match "(?m)^tools:.*'microsoft-learn/\*'"
+        $pages | Should -Not -Match 'plugin_power-pages'
+        $pages | Should -Match "(?m)^tools:.*'execute'"
     }
 
     It 'gives each wrapper a prefix-namespaced registered name' {
         (Get-Content -LiteralPath $script:PlannerWrapper -Raw) | Should -Match "(?m)^name:\s*'010-canvas-app-planner'"
+    }
+
+    It 'gives every wrapper the lean worker contract: token rule, no delegation, WORK RESULT' {
+        foreach ($w in @($script:PlannerWrapper, $script:BuilderWrapper, $script:ReviewerWrapper)) {
+            $t = Get-Content -LiteralPath $w -Raw
+            $t | Should -Match 'APPROVED:DELETE' -Because "$w must know the token format"
+            $t | Should -Match 'phrasing is NOT the token' -Because "$w must not treat user wording as approval"
+            $t | Should -Match 'WORK RESULT' -Because $w
+            $t | Should -Match '(?m)^## Scope boundary' -Because $w
+            $t | Should -Match '(?m)^agents: \[\]' -Because 'workers never delegate'
+        }
     }
 }
 
@@ -97,6 +136,22 @@ Describe 'Dynamic worker discovery - Lead wiring' {
         $lead = Get-Content -LiteralPath $script:LeadFile -Raw
         $lead | Should -Match "(?m)^agents:.*'010-canvas-app-planner'"
         $lead | Should -Match "(?m)^agents:.*'010-canvas-screen-builder'"
+    }
+
+    It 'fills the Lead''s roster with dispatch name -> Microsoft name -> tools' {
+        $lead = Get-Content -LiteralPath $script:LeadFile -Raw
+        $roster = [regex]::Match($lead, '(?s)<!-- team-roster:start -->(.*?)<!-- team-roster:end -->').Groups[1].Value
+        $roster | Should -Match '\| Dispatch name \| Microsoft worker \(plugin\) \| Tools \|'
+        $roster | Should -Match '`010-canvas-screen-builder` \| `canvas-screen-builder` \(canvas-apps\)'
+        $roster | Should -Match '`010-canvas-app-planner`.*canvas-authoring/\*'
+        $roster | Should -Not -Match 'No Microsoft worker agents were found' -Because 'the placeholder must be replaced'
+        ([regex]::Matches($lead, 'team-roster:start')).Count | Should -Be 1 -Because 'roster injection must be idempotent'
+    }
+
+    It 'leaves Leads without discovered workers on the placeholder roster' {
+        $other = Get-Content -LiteralPath (Join-Path $script:Run.AgentsDir '020-power-automate-lead.agent.md') -Raw
+        $other | Should -Match 'No Microsoft worker agents were found'
+        $other | Should -Match '(?m)^agents: \[\]'
     }
 
     It 'does not touch the flat 12-agent core (wrappers use the -sub- marker only)' {
@@ -113,7 +168,7 @@ Describe 'Dynamic worker discovery - self-pruning' {
         $run = Invoke-EmitWithStagedWorkers @{
             'canvas-apps' = @{
                 'canvas-app-planner'    = (New-FakeWorker -Name 'canvas-app-planner')
-                'canvas-screen-builder' = (New-FakeWorker -Name 'canvas-screen-builder' -ReadOnly)
+                'canvas-screen-builder' = (New-FakeWorker -Name 'canvas-screen-builder' -EditNoMcp)
             }
         }
         try {
