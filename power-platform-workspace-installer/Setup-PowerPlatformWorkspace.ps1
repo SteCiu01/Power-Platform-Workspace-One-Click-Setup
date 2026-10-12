@@ -31,7 +31,7 @@ param(
 )
 
 # Product version - single source of truth (mirrors the manifest productVersion).
-$productVersion = '0.5.0'
+$productVersion = '0.5.1'
 
 # Keep the window open on any error so the user can read it (interactive mode
 # only - emit / verify modes must stay non-interactive for CI).
@@ -67,6 +67,30 @@ function Get-Sha256Hex ([string]$LiteralPath) {
 # =====================================================================
 # -VerifyRoot : integrity check against .github/installed-manifest.json
 # =====================================================================
+# -- Helper: read JSON the way VS Code does (UTF-8, BOM, // and /* */ comments, trailing commas)
+# Returns $null when the text still does not parse. Comments are stripped outside strings only.
+function Read-JsonLenient ([string]$LiteralPath) {
+    $text = [System.IO.File]::ReadAllText($LiteralPath, [System.Text.Encoding]::UTF8)
+    if ($text.Length -gt 0 -and $text[0] -eq [char]0xFEFF) { $text = $text.Substring(1) }
+    try { return ($text | ConvertFrom-Json) } catch { }
+    $sb = New-Object System.Text.StringBuilder; $inStr = $false; $i = 0; $n = $text.Length
+    while ($i -lt $n) {
+        $c = $text[$i]
+        if ($inStr) {
+            [void]$sb.Append($c)
+            if ($c -eq '\' -and $i + 1 -lt $n) { [void]$sb.Append($text[$i + 1]); $i += 2; continue }
+            if ($c -eq '"') { $inStr = $false }
+            $i++; continue
+        }
+        if ($c -eq '"') { $inStr = $true; [void]$sb.Append($c); $i++; continue }
+        if ($c -eq '/' -and $i + 1 -lt $n -and $text[$i + 1] -eq '/') { while ($i -lt $n -and $text[$i] -ne "`n") { $i++ }; continue }
+        if ($c -eq '/' -and $i + 1 -lt $n -and $text[$i + 1] -eq '*') { $end = $text.IndexOf('*/', $i + 2); $i = if ($end -lt 0) { $n } else { $end + 2 }; continue }
+        [void]$sb.Append($c); $i++
+    }
+    $clean = [regex]::Replace($sb.ToString(), ',(\s*[}\]])', '$1')
+    try { return ($clean | ConvertFrom-Json) } catch { return $null }
+}
+
 if ($VerifyRoot) {
     $verifyFull = [System.IO.Path]::GetFullPath($VerifyRoot)
     $manifestFile = Join-Path $verifyFull '.github\installed-manifest.json'
@@ -76,7 +100,12 @@ if ($VerifyRoot) {
     }
     $manifestData = Get-Content -LiteralPath $manifestFile -Raw | ConvertFrom-Json
     $drift = @()
-    foreach ($entry in $manifestData.files) {
+    # Authored files (core agents, docs, scripts) and discovered worker wrappers are hashed.
+    $hashed = @($manifestData.files) + @($manifestData.discovered)
+    $nHashed = @($hashed | Where-Object { $_ }).Count
+    if ($nHashed -eq 0) { $drift += "EMPTY MANIFEST: no hashed files listed - the install did not complete or the manifest was tampered with" }
+    foreach ($entry in $hashed) {
+        if (-not $entry) { continue }
         $target = Join-Path $verifyFull $entry.path
         if (-not (Test-Path -LiteralPath $target)) {
             $drift += "MISSING: $($entry.path)"
@@ -87,12 +116,33 @@ if ($VerifyRoot) {
             $drift += "CHANGED: $($entry.path)"
         }
     }
+    # Merge files (settings / mcp / .code-workspace) legitimately hold user keys, so they
+    # are key-checked, not hashed: every installer-required key must still be present with
+    # a usable value (not null), and keys listed in requiredTrue must be exactly true.
+    foreach ($entry in @($manifestData.merged)) {
+        if (-not $entry) { continue }
+        $target = Join-Path $verifyFull $entry.path
+        if (-not (Test-Path -LiteralPath $target)) { $drift += "MISSING: $($entry.path)"; continue }
+        $doc = Read-JsonLenient -LiteralPath $target
+        if ($null -eq $doc) { $drift += "UNPARSEABLE: $($entry.path)"; continue }
+        $mustBeTrue = @($entry.requiredTrue)
+        foreach ($keyPath in @(@($entry.requiredKeys) + $mustBeTrue | Select-Object -Unique)) {
+            if (-not $keyPath) { continue }
+            $node = $doc; $found = $true
+            foreach ($seg in ($keyPath -split '::')) {
+                if ($null -ne $node -and $node.PSObject.Properties[$seg]) { $node = $node.$seg } else { $found = $false; break }
+            }
+            if (-not $found -or $null -eq $node) { $drift += "KEY MISSING: $($entry.path) -> $keyPath"; continue }
+            if (($mustBeTrue -contains $keyPath) -and ($node -ne $true)) { $drift += "KEY DISABLED: $($entry.path) -> $keyPath (must be true)" }
+        }
+    }
     if ($drift.Count -gt 0) {
-        Write-Host "Integrity check FAILED - $($drift.Count) file(s) drifted:" -ForegroundColor Red
+        Write-Host "Integrity check FAILED - $($drift.Count) item(s) drifted:" -ForegroundColor Red
         $drift | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
         exit 1
     }
-    Write-Host "Integrity check PASSED - all $($manifestData.files.Count) managed files match." -ForegroundColor Green
+    $nMerged = @($manifestData.merged | Where-Object { $_ }).Count
+    Write-Host "Integrity check PASSED - $nHashed hashed file(s) match and $nMerged merge file(s) carry every required key with the required value." -ForegroundColor Green
     exit 0
 }
 
@@ -121,9 +171,10 @@ function Merge-SettingValue ($Existing, [hashtable]$Required) {
         $val = $Required[$key]
         $cur = if ($merged.Contains($key)) { $merged[$key] } else { $null }
         $curIsObj = ($cur -is [PSCustomObject]) -or ($cur -is [System.Collections.IDictionary])
-        if ($val -is [hashtable] -and $curIsObj) {
-            # Both sides are objects -- recurse so nested user keys survive
-            $merged[$key] = Merge-SettingValue $cur $val
+        if ($val -is [System.Collections.IDictionary] -and $curIsObj) {
+            # Both sides are objects -- recurse so nested user keys survive ([ordered] is not a [hashtable]).
+            $req = @{}; foreach ($k in $val.Keys) { $req[$k] = $val[$k] }
+            $merged[$key] = Merge-SettingValue $cur $req
         } else {
             $merged[$key] = $val
         }
@@ -132,20 +183,32 @@ function Merge-SettingValue ($Existing, [hashtable]$Required) {
 }
 
 # -- Helper: merge installer-owned keys into existing JSON settings -----
+# Reads like VS Code (UTF-8, comments, trailing commas). A file that still does not
+# parse is NEVER replaced: it is left exactly as it is, reported, and recorded in
+# $script:unmergedConfigs so the summary and -VerifyRoot surface it. Returns $true
+# when the file was written.
+$script:unmergedConfigs = @()
 function Merge-JsonSettings ([string]$Path, [hashtable]$Required) {
     $parsed = $null
+    $leaf = Split-Path $Path -Leaf
     if (Test-Path $Path) {
-        try {
-            $parsed = Get-Content $Path -Raw | ConvertFrom-Json
-        } catch {
-            # Malformed JSON -- back up and start fresh
-            Copy-Item $Path "$Path.bak" -Force
-            Write-Host "  Backed up malformed settings.json to settings.json.bak" -ForegroundColor Yellow
+        $parsed = Read-JsonLenient -LiteralPath $Path
+        if ($null -eq $parsed) {
+            $script:unmergedConfigs += $Path
+            Write-Host "  $leaf could not be parsed as JSON - left untouched. Fix it and re-run the installer; required keys were NOT added." -ForegroundColor Yellow
+            return $false
+        }
+        $raw = [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8)
+        try { $null = ($raw.TrimStart([char]0xFEFF) | ConvertFrom-Json); $hadComments = $false } catch { $hadComments = $true }
+        if ($hadComments) {
+            Copy-Item -LiteralPath $Path -Destination "$Path.bak" -Force
+            Write-Host "  $leaf had comments / trailing commas; keys preserved, comments dropped (original kept as $leaf.bak)." -ForegroundColor DarkGray
         }
     }
     $existing = Merge-SettingValue $parsed $Required
     $json = $existing | ConvertTo-Json -Depth 10
     Write-ManagedFile $Path $json
+    return $true
 }
 
 # -- Helper: write a managed file as UTF-8 WITHOUT a BOM ----------------
@@ -179,6 +242,46 @@ function Get-SkillContainerDirs {
     return @($found | Sort-Object)
 }
 
+# -- Microsoft vendor clones (read-only upstream, force-refreshed on update) --
+# Two layouts exist upstream:
+#   plugins - <clone>/plugins/<plugin>/{agents,skills,references}   (power-platform-skills)
+#   single  - the clone IS one plugin: <clone>/{agents,skills,reference} (copilot-studio-plugin)
+# Everything downstream (skill registration, worker discovery, knowledge refs, the
+# status script) is driven from this table, so adding a vendor is one row here plus
+# a Lead whose primarySkills names the plugin id.
+$vendorClones = @(
+    [pscustomobject]@{ Name = 'power-platform-skills'; Url = 'https://github.com/microsoft/power-platform-skills.git'; Layout = 'plugins'; Label = 'Microsoft power-platform-skills' },
+    [pscustomobject]@{ Name = 'copilot-studio-plugin'; Url = 'https://github.com/microsoft/copilot-studio-plugin.git'; Layout = 'single';  Label = 'Microsoft copilot-studio-plugin' }
+)
+# Workspace-relative folders (backslash) under which SKILL.md containers are searched.
+$vendorSkillSearchPaths = @($vendorClones | ForEach-Object { if ($_.Layout -eq 'plugins') { "$($_.Name)\plugins" } else { "$($_.Name)\skills" } })
+
+# plugin id -> workspace-relative plugin root (forward slashes). Only plugins present on disk.
+function Get-PluginRoots ([string]$RootPath) {
+    $roots = [ordered]@{}
+    foreach ($v in $vendorClones) {
+        $cloneFull = Join-Path $RootPath $v.Name
+        if (-not (Test-Path -LiteralPath $cloneFull)) { continue }
+        if ($v.Layout -eq 'plugins') {
+            $pf = Join-Path $cloneFull 'plugins'
+            if (Test-Path -LiteralPath $pf) {
+                foreach ($d in @(Get-ChildItem -LiteralPath $pf -Directory -ErrorAction SilentlyContinue)) { $roots[$d.Name] = "$($v.Name)/plugins/$($d.Name)" }
+            }
+        } else {
+            $roots[$v.Name] = $v.Name
+        }
+    }
+    return $roots
+}
+# Resolves a plugin id even when the clone is absent (emit mode / offline) so knowledge
+# refs and messages still name the expected path.
+function Resolve-PluginRoot ([string]$PluginId, $Roots) {
+    if ($Roots -and $Roots.Contains($PluginId)) { return [string]$Roots[$PluginId] }
+    $single = $vendorClones | Where-Object { $_.Layout -eq 'single' -and $_.Name -eq $PluginId } | Select-Object -First 1
+    if ($single) { return $single.Name }
+    $multi = $vendorClones | Where-Object { $_.Layout -eq 'plugins' } | Select-Object -First 1
+    return "$($multi.Name)/plugins/$PluginId"
+}
 # -- Helper: force a vendor clone to exactly mirror upstream ------------
 # The installer is authoritative for vendor repos: they must always match the
 # published upstream. We fetch + prune, stash any local edits (recoverable via
@@ -188,8 +291,10 @@ function Get-SkillContainerDirs {
 # divergence risk. Returns $true on success. git writes progress to stderr even
 # on success: under the script-wide EAP=Stop a `2>&1` would turn that into a
 # terminating error and the reset would never run, so stderr is discarded with
-# `2>$null` and success is judged on $LASTEXITCODE only. Prints the before/after
-# commit so a stale clone can never refresh silently (or fail silently).
+# `2>$null` and every git step's $LASTEXITCODE is captured IMMEDIATELY (a later
+# successful command would otherwise overwrite it). A failed stash aborts BEFORE
+# any reset so local edits are never discarded; success means HEAD literally
+# equals the upstream commit, not merely "no error was seen".
 function Update-VendorClone ([string]$RepoPath, [string]$Label) {
     $ok = $false
     if (-not (Test-Path -LiteralPath $RepoPath)) { return $ok }
@@ -201,25 +306,68 @@ function Update-VendorClone ([string]$RepoPath, [string]$Label) {
             Write-Host "    ${Label}: fetch failed (offline or blocked) - keeping the current clone." -ForegroundColor Yellow
             return $ok
         }
+        # Full ref names (refs/remotes/...) resolve straight to the commit; they avoid the
+        # '^{commit}' peel syntax, whose caret is an escape character for cmd-based git shims.
+        $target = (& git -C $RepoPath rev-parse --verify --quiet 'refs/remotes/origin/HEAD' 2>$null)
+        $targetExit = $LASTEXITCODE
+        # origin/HEAD is a LOCAL symbolic ref set at clone time; if upstream renamed its default
+        # branch it goes stale. Prefer the branch origin advertises now (ls-remote --symref).
+        $advertisedLines = @(& git -C $RepoPath ls-remote --symref origin HEAD 2>$null)
+        $advExit = $LASTEXITCODE
+        $advertised = if ($advertisedLines.Count -gt 0) { [string]$advertisedLines[0] } else { '' }
+        if ($advExit -eq 0 -and $advertised -match 'ref:\s*refs/heads/(\S+)\s+HEAD') {
+            $advBranch = $Matches[1]
+            $adv = (& git -C $RepoPath rev-parse --verify --quiet "refs/remotes/origin/$advBranch" 2>$null)
+            if ($LASTEXITCODE -eq 0 -and $adv) {
+                if ($adv -ne $target) { & git -C $RepoPath remote set-head origin $advBranch 2>$null | Out-Null }
+                $target = $adv; $targetExit = 0
+            }
+        }
+        if ($targetExit -ne 0 -or -not $target) {
+            # Older clones may lack origin/HEAD; fall back to the current branch's upstream - but only on origin.
+            $up = (& git -C $RepoPath rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>$null)
+            if ($LASTEXITCODE -eq 0 -and $up -like 'origin/*') {
+                $target = (& git -C $RepoPath rev-parse --verify --quiet "refs/remotes/$up" 2>$null)
+                $targetExit = $LASTEXITCODE
+            }
+        }
+        if ($targetExit -ne 0 -or -not $target) {
+            Write-Host "    ${Label}: cannot resolve the upstream commit (no origin/HEAD or origin tracking branch) - clone left as-is." -ForegroundColor Yellow
+            return $ok
+        }
         $dirty = @(& git -C $RepoPath status --porcelain 2>$null)
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "    ${Label}: 'git status' failed - working-tree state unknown, refresh skipped so nothing is lost." -ForegroundColor Yellow
+            return $ok
+        }
+        $stashed = $false
         if ($dirty.Count -gt 0) {
             $stamp = (Get-Date).ToString('yyyyMMdd-HHmmss')
             & git -C $RepoPath stash push -u -m "installer-autostash $stamp" 2>$null | Out-Null
+            $stashExit = $LASTEXITCODE
+            $stillDirty = @(& git -C $RepoPath status --porcelain 2>$null)
+            $statusExit = $LASTEXITCODE
+            if ($stashExit -ne 0 -or $statusExit -ne 0 -or $stillDirty.Count -gt 0) {
+                Write-Host "    ${Label}: could not stash local changes (git identity missing?) - refresh skipped so nothing is lost. Commit or discard them, then re-run." -ForegroundColor Yellow
+                return $ok
+            }
+            $stashed = $true
             Write-Host "    $Label had local changes - stashed as 'installer-autostash $stamp' (recover with 'git -C <repo> stash list')." -ForegroundColor DarkGray
         }
-        $before = (& git -C $RepoPath rev-parse --short HEAD 2>$null)
-        & git -C $RepoPath reset --hard origin/HEAD 2>$null | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            # Older clones may lack origin/HEAD; fall back to the current branch's upstream.
-            & git -C $RepoPath reset --hard '@{upstream}' 2>$null | Out-Null
-        }
-        $after = (& git -C $RepoPath rev-parse --short HEAD 2>$null)
-        if ($LASTEXITCODE -eq 0 -and $after) {
+        $before = (& git -C $RepoPath rev-parse HEAD 2>$null)
+        & git -C $RepoPath reset --hard $target 2>$null | Out-Null
+        $resetExit = $LASTEXITCODE
+        $after = (& git -C $RepoPath rev-parse HEAD 2>$null)
+        if ($resetExit -eq 0 -and $after -eq $target) {
             $ok = $true
-            if ($before -ne $after) { Write-Host "    $Label refreshed: $before -> $after" -ForegroundColor Green }
-            else { Write-Host "    $Label already at upstream ($after)." -ForegroundColor DarkGray }
+            $shortBefore = if ($before) { $before.Substring(0, 7) } else { '?' }
+            $shortAfter = $after.Substring(0, 7)
+            if ($before -ne $after) { Write-Host "    $Label refreshed: $shortBefore -> $shortAfter" -ForegroundColor Green }
+            else { Write-Host "    $Label already at upstream ($shortAfter)." -ForegroundColor DarkGray }
         } else {
-            Write-Host "    ${Label}: could not reset to upstream - clone left as-is." -ForegroundColor Yellow
+            $where = if ($after) { $after.Substring(0,7) } else { '?' }
+            $recover = if ($stashed) { " Your local edits are safe in the stash ('git -C <repo> stash pop' to restore them)." } else { '' }
+            Write-Host "    ${Label}: reset to upstream failed (exit $resetExit) - clone left at $where; inspect with 'git -C <repo> status'.$recover" -ForegroundColor Yellow
         }
     } catch {
         Write-Host "    ${Label}: refresh error - $($_.Exception.Message)" -ForegroundColor Yellow
@@ -238,7 +386,7 @@ function Update-VendorClone ([string]$RepoPath, [string]$Label) {
 $agentManifestJson = @'
 {
   "schemaVersion": 1,
-  "productVersion": "0.5.0",
+  "productVersion": "0.5.1",
   "defaults": {
     "mode": "both",
     "tools": ["read", "search"],
@@ -258,7 +406,8 @@ $agentManifestJson = @'
       "allowedChildren": [
         "Solution Architect", "Integration QA & Change Controller", "Workspace Maintainer",
         "Canvas Apps Lead", "Power Automate Lead", "Power Pages Lead", "Code Apps Lead",
-        "Model Apps Lead", "Mobile Apps Lead", "MCP Apps Lead", "Solution ALM & Environments Lead"
+        "Model Apps Lead", "Mobile Apps Lead", "MCP Apps Lead", "Solution ALM & Environments Lead",
+        "Copilot Studio Lead"
       ],
       "visibility": "visible",
       "userInvocable": true,
@@ -275,7 +424,8 @@ $agentManifestJson = @'
       "parent": "power-platform-master",
       "allowedChildren": [
         "Canvas Apps Lead", "Power Automate Lead", "Power Pages Lead", "Code Apps Lead",
-        "Model Apps Lead", "Mobile Apps Lead", "MCP Apps Lead", "Solution ALM & Environments Lead"
+        "Model Apps Lead", "Mobile Apps Lead", "MCP Apps Lead", "Solution ALM & Environments Lead",
+        "Copilot Studio Lead"
       ],
       "visibility": "visible",
       "userInvocable": true,
@@ -310,7 +460,7 @@ $agentManifestJson = @'
       "userInvocable": true,
       "tools": ["read", "search", "execute", "edit"],
       "defaultRisk": "medium",
-      "focus": "Keeps the workspace itself healthy: refreshes the cloned skills repo, maintains .vscode config / MCP registrations / the custom embedded skills, and repairs setup drift. Edits workspace scaffolding, not user solution source."
+      "focus": "Keeps the workspace itself healthy: refreshes the two cloned Microsoft vendor repos (power-platform-skills, copilot-studio-plugin), maintains .vscode config / MCP registrations / the custom embedded skills, and repairs setup drift. Edits workspace scaffolding, not user solution source."
     },
     {
       "id": "canvas-apps-lead",
@@ -319,7 +469,7 @@ $agentManifestJson = @'
       "level": "team-lead",
       "department": "canvas-apps",
       "parent": "power-platform-master",
-      "allowedChildren": [],
+      "allowedChildren": ["Solution Architect", "Integration QA & Change Controller"],
       "visibility": "visible",
       "userInvocable": true,
       "tools": ["agent", "read", "search", "execute", "edit"],
@@ -336,7 +486,7 @@ $agentManifestJson = @'
       "level": "team-lead",
       "department": "power-automate",
       "parent": "power-platform-master",
-      "allowedChildren": [],
+      "allowedChildren": ["Solution Architect", "Integration QA & Change Controller"],
       "visibility": "visible",
       "userInvocable": true,
       "tools": ["agent", "read", "search", "execute", "edit"],
@@ -353,7 +503,7 @@ $agentManifestJson = @'
       "level": "team-lead",
       "department": "power-pages",
       "parent": "power-platform-master",
-      "allowedChildren": [],
+      "allowedChildren": ["Solution Architect", "Integration QA & Change Controller"],
       "visibility": "visible",
       "userInvocable": true,
       "tools": ["agent", "read", "search", "execute", "edit"],
@@ -370,7 +520,7 @@ $agentManifestJson = @'
       "level": "team-lead",
       "department": "code-apps",
       "parent": "power-platform-master",
-      "allowedChildren": [],
+      "allowedChildren": ["Solution Architect", "Integration QA & Change Controller"],
       "visibility": "visible",
       "userInvocable": true,
       "tools": ["agent", "read", "search", "execute", "edit"],
@@ -387,7 +537,7 @@ $agentManifestJson = @'
       "level": "team-lead",
       "department": "model-apps",
       "parent": "power-platform-master",
-      "allowedChildren": [],
+      "allowedChildren": ["Solution Architect", "Integration QA & Change Controller"],
       "visibility": "visible",
       "userInvocable": true,
       "tools": ["agent", "read", "search", "execute", "edit"],
@@ -404,7 +554,7 @@ $agentManifestJson = @'
       "level": "team-lead",
       "department": "mobile-apps",
       "parent": "power-platform-master",
-      "allowedChildren": [],
+      "allowedChildren": ["Solution Architect", "Integration QA & Change Controller"],
       "visibility": "visible",
       "userInvocable": true,
       "tools": ["agent", "read", "search", "execute", "edit"],
@@ -421,7 +571,7 @@ $agentManifestJson = @'
       "level": "team-lead",
       "department": "mcp-apps",
       "parent": "power-platform-master",
-      "allowedChildren": [],
+      "allowedChildren": ["Solution Architect", "Integration QA & Change Controller"],
       "visibility": "visible",
       "userInvocable": true,
       "tools": ["agent", "read", "search", "execute", "edit"],
@@ -438,7 +588,7 @@ $agentManifestJson = @'
       "level": "team-lead",
       "department": "alm-environments",
       "parent": "power-platform-master",
-      "allowedChildren": [],
+      "allowedChildren": ["Solution Architect", "Integration QA & Change Controller"],
       "visibility": "visible",
       "userInvocable": true,
       "tools": ["agent", "read", "search", "execute", "edit"],
@@ -447,6 +597,23 @@ $agentManifestJson = @'
       "artifactTypes": ["solution (managed/unmanaged)", "environment", "publisher"],
       "defaultRisk": "high",
       "focus": "Owns solution lifecycle and environments via pac CLI: init/export/unpack/pack/import, publisher setup, environment selection and cross-environment promotion, with Production imports gated on explicit confirmation."
+    },
+    {
+      "id": "copilot-studio-lead",
+      "displayName": "Copilot Studio Lead",
+      "filename": "090-copilot-studio-lead.agent.md",
+      "level": "team-lead",
+      "department": "copilot-studio",
+      "parent": "power-platform-master",
+      "allowedChildren": ["Solution Architect", "Integration QA & Change Controller"],
+      "visibility": "visible",
+      "userInvocable": true,
+      "tools": ["agent", "read", "search", "execute", "edit"],
+      "mcpServers": ["microsoft-learn"],
+      "primarySkills": ["copilot-studio-plugin"],
+      "artifactTypes": ["Copilot Studio agent (MCS2 YAML project, pac copilot)"],
+      "defaultRisk": "medium",
+      "focus": "Owns Copilot Studio agents authored as MCS2 YAML projects with pac copilot (init/clone/pull/push/publish, knowledge, skills, tools), using Microsoft's copilot-studio-plugin skills and its bundled workers; publish and delete are gated."
     }
   ]
 }
@@ -494,15 +661,15 @@ function Get-AgentBody ($Agent, [string]$Label, [string[]]$ChildLabels) {
     $bullets = New-Object System.Collections.Generic.List[string]
     $bullets.Add($flowBullet)
     $bullets.Add('- Inspect the current files, git branch, `pac auth list` and the selected environment before you change anything.')
-    $bullets.Add('- Skills are registered natively (custom `.github/skills`, Microsoft `power-platform-skills/plugins/<plugin>/skills`): use the list in your Knowledge section and read the relevant SKILL.md (and its `references/`) before authoring. Custom skills win on style; upstream skills win on syntax/spec. Only if a skill is missing from your list, re-discover it by keyword under `power-platform-skills/plugins/*/skills/`.')
-    $bullets.Add('- Microsoft''s plugins target another agent runtime: their `Task` tool is your `agent` tool, `${PLUGIN_ROOT}` is `power-platform-skills/plugins/<plugin>`, and `AskUserQuestion` does not exist for a dispatched agent (return `NEEDS INPUT` instead). Skip the plugin `AGENTS.md` / `CLAUDE.md` files; follow the `SKILL.md` and `references/`.')
+    $bullets.Add('- Skills are registered natively (custom `.github/skills`, Microsoft `power-platform-skills/plugins/<plugin>/skills` and `copilot-studio-plugin/skills`): use the list in your Knowledge section and read the relevant SKILL.md (and its `references/` / `reference/`) before authoring. Custom skills win on style; upstream skills win on syntax/spec. Only if a skill is missing from your list, re-discover it by keyword under `power-platform-skills/plugins/*/skills/` or `copilot-studio-plugin/skills/`.')
+    $bullets.Add('- Microsoft''s plugins target another agent runtime: their `Task` tool is your `agent` tool, `${PLUGIN_ROOT}` is the plugin folder (`power-platform-skills/plugins/<plugin>` or `copilot-studio-plugin`), a `<plugin>:<skill>` reference such as `mcs-assistant:publish-agent` means that plugin''s `skills/<skill>/SKILL.md`, and `AskUserQuestion` does not exist for a dispatched agent (return `NEEDS INPUT` instead). Skip the plugin `AGENTS.md` / `CLAUDE.md` files; follow the `SKILL.md` and references.')
     $bullets.Add('- Use `.github/agent-docs/tool-status.json` to see which CLIs and MCP runtimes are available. When an entry has a `path`, invoke that exact executable so an older same-named copy cannot take precedence. If a needed tool is missing, do ONE optional live re-check, then fall back to the offline pac CLI path rather than failing; route install or config repair to the Workspace Maintainer.')
-    $bullets.Add('- Work only in your assigned artifact paths. The cloned `power-platform-skills/` repo is read-only reference - never edit vendor files.')
+    $bullets.Add('- Work only in your assigned artifact paths. The cloned `power-platform-skills/` and `copilot-studio-plugin/` repos are read-only reference - never edit vendor files.')
     $bullets.Add('- Validate every change and return concise evidence, risks, and remaining actions. Never claim a check you did not run.')
     $bullets.Add('- Never expose secrets. Treat **Production as read-only** unless the user has typed `confirm push to prod` in this conversation.')
     $bullets.Add('- Destructive, irreversible or shared-environment actions need explicit user approval captured as a literal token (`APPROVED:<ACTION>:<artifact>`; Production import uses `confirm push to prod`). Deleting or dropping any app, screen, control, flow, table, column, form, view, page, file or branch, overwriting local source with an export, or importing into TEST/UAT/PROD is destructive even when the user asked for it in plain words: the request itself is not the approval. Only the top-level agent (the one the user selected) can ask the user - it confirms once, then puts the token in `approvals granted`. Every dispatched agent without the token must return `NEEDS APPROVAL` with the exact action and let it bubble up.')
     if ($canDelegate) {
-        $bullets.Add('- **Dispatch health.** If the `agent` tool is missing when you must delegate, the workspace was opened without `chat.subagents.allowInvocationsFromSubagents: true` (the installer writes it to `.vscode/settings.json` and to the `<folder>.code-workspace`; in a multi-root window only the `.code-workspace` / user settings count). Report that exact cause; do not improvise the work yourself. Genuine transport errors (`ERR_HTTP2_SERVER_REFUSED_STREAM`, an empty completion) are retry-safe: retry 2-3 times with a short pause before reporting.')
+        $bullets.Add('- **Dispatch health.** If the `agent` tool is missing or a dispatch is refused, check the three usual causes before anything else: (1) the window was opened without `chat.subagents.allowInvocationsFromSubagents: true` (the installer writes it to `.vscode/settings.json` and to the `<folder>.code-workspace`; in a multi-root window only the `.code-workspace` / user settings count); (2) the target name is not in your front-matter `agents:` list (only listed names can be dispatched); (3) the target `.agent.md` failed to parse (BOM, broken front matter). Report the exact cause; do not improvise the work yourself. Genuine transport errors (`ERR_HTTP2_SERVER_REFUSED_STREAM`, an empty completion) may be retried 2-3 times with a short pause ONLY for read-only calls and for dispatches whose WORK ORDER contains no write. A dispatch that could have written (edits, import, `compile_canvas`, flow publish) is NOT retry-safe: the child may have finished before the response was lost. Reconcile first (`git status` / `git diff` on the artifact, `pac solution list`, a fresh `sync_canvas`, the run history) and re-dispatch only for what is verifiably missing, stating in the new WORK ORDER what already exists.')
     }
     foreach ($b in $bullets) { [void]$sb.AppendLine($b) }
 
@@ -595,7 +762,7 @@ Return the PLAN to whoever dispatched you (Master or a Team Lead). Flag any Prod
 ## Two ways you are used
 
 - **Before work (Master -> you):** produce the PLAN. The Master runs it.
-- **Mid-work (a Team Lead -> you):** answer the single design / dependency question asked, in the same PLAN step format for the affected step(s) only, and return. Do not re-plan the whole request.
+- **Mid-work (a Team Lead -> you):** answer the single design / dependency question asked, in the same PLAN step format for the affected step(s) only, and return. Do not re-plan the whole request, and never dispatch a Team Lead from this mode (the Lead that asked is already running; dispatching it back would loop).
 - **Run mode (explicit only):** when the Master's WORK ORDER says `run the plan`, you dispatch the Team Leads yourself in PLAN order, relay their WORK RESULTs and any `request` upward unchanged, and return one consolidated WORK RESULT. You still never write artifacts.
 
 ## Team Leads you can sequence
@@ -642,26 +809,27 @@ You maintain the workspace scaffolding itself - not the user's solution source. 
 
 ## What you own
 
-- **Force-refresh the cloned skills repo to upstream** (same rule as the installer, nothing lost): `git -C power-platform-skills fetch --prune origin`; if `git -C power-platform-skills status --porcelain` shows local edits, `git -C power-platform-skills stash push -u -m "maintenance-autostash <timestamp>"` first and tell the user how to recover; then `git -C power-platform-skills reset --hard origin/HEAD`. Print the before/after commit. If the repo is missing, re-clone `https://github.com/microsoft/power-platform-skills.git`. Never push to it and never edit its files.
-- After a refresh, re-register skill containers in `.vscode/settings.json` -> `chat.agentSkillsLocations` if new `plugins/<plugin>/skills` folders appeared (`.github/agent-docs/Get-SessionStatus.ps1` also does this), and remind the user to reload the window.
+- **Force-refresh BOTH cloned vendor repos to upstream** (same rule as the installer, nothing lost) - `power-platform-skills` (`https://github.com/microsoft/power-platform-skills.git`) and `copilot-studio-plugin` (`https://github.com/microsoft/copilot-studio-plugin.git`). For each: `git -C <repo> fetch --prune origin`; if `git -C <repo> status --porcelain` shows local edits, `git -C <repo> stash push -u -m "maintenance-autostash <timestamp>"` first and tell the user how to recover; then `git -C <repo> reset --hard origin/HEAD`. Print the before/after commit. If a repo is missing, re-clone it. Never push to them and never edit their files. After a refresh the status script will report that the clone moved past the commit the agents were generated from - tell the user to re-run the installer so worker wrappers and skill lists are regenerated (discovery runs at install time, not at maintenance time).
+- After a refresh, re-register skill containers in `.vscode/settings.json` -> `chat.agentSkillsLocations` if new `plugins/<plugin>/skills` or `copilot-studio-plugin/skills` folders appeared (`.github/agent-docs/Get-SessionStatus.ps1` also does this), and remind the user to reload the window.
 - Keep `chat.subagents.allowInvocationsFromSubagents: true` in `.vscode/settings.json` - without it Team Leads cannot dispatch their Microsoft workers.
 - Maintain `.vscode/mcp.json` (canvas-authoring + flow-agent + microsoft-learn registrations), `.vscode/settings.json` / `tasks.json`, and the embedded skills under `.github/skills/`.
-- Refresh `.github/agent-docs/tool-status.json` and repair setup drift (malformed config, missing files). Re-running the installer is always the safe repair; suggest it when scaffolding is broken. The hidden `*-sub-*.agent.md` worker wrappers are regenerated by the installer from Microsoft's `plugins/<plugin>/agents/*.md` - do not hand-edit them.
+- Refresh `.github/agent-docs/tool-status.json` and repair setup drift (malformed config, missing files). Re-running the installer is always the safe repair; suggest it when scaffolding is broken. The hidden `*-sub-*.agent.md` worker wrappers are regenerated by the installer from Microsoft's `plugins/<plugin>/agents/*.md` and `copilot-studio-plugin/agents/*.md` - do not hand-edit them.
 
-When selected directly, first offer: **1. Light maintenance** - refresh the skills clone (stash-then-mirror), re-register skill folders, refresh the tool inventory. **2. Deep maintenance** - light plus `-VerifyRoot` drift report, MCP registration check, and a worker-wrapper freshness check (re-run the installer if Microsoft added or removed workers).
+When selected directly, first offer: **1. Light maintenance** - refresh both vendor clones (stash-then-mirror), re-register skill folders, refresh the tool inventory. **2. Deep maintenance** - light plus `-VerifyRoot` drift report, MCP registration check, and a worker-wrapper freshness check (re-run the installer if Microsoft added or removed workers in either clone).
 
 ## Managed files are overwritten - guide edits into NEW files
 
-`.github/installed-manifest.json` is the authoritative write-log: it lists every file the installer ships and its SHA256 at write time. Classify each managed file:
+`.github/installed-manifest.json` is the authoritative write-log. It has three sections: `files` and `discovered` are authored files and worker wrappers with their SHA256 at write time (overwritten on every update); `merged` lists the three config files (`.vscode/settings.json`, `.vscode/mcp.json`, `<folder>.code-workspace`) that the installer only MERGES - user keys in them survive, the installer-required keys are re-asserted and checked by value. It also records `vendorCommits`, the commit of each vendor clone the agents were generated from; when a clone moves (maintenance refresh) the status script asks for an installer re-run so rosters and skill lists match. Classify each managed file:
 
-1. **Managed (in the manifest)** - the installer overwrites it on every update. If the user edited one, **their edit will be reset on the next update.** Do not protect it and do not build on it in place. Tell them plainly, then steer the change into a **NEW** file (a new agent, a new skill, a new instructions file) under `.github/` that the installer will never touch.
-2. **User-created (not in the manifest)** - it is theirs. Never modify or delete it. This is how users extend the workspace safely.
+1. **Managed (hashed in the manifest)** - the installer overwrites it on every update. If the user edited one, **their edit will be reset on the next update.** Do not protect it and do not build on it in place. Tell them plainly, then steer the change into a **NEW** file (a new agent, a new skill, a new instructions file) under `.github/` that the installer will never touch.
+2. **Merged (the three config files)** - the user may add their own keys; only the installer-required keys are enforced.
+3. **User-created (not in the manifest)** - it is theirs. Never modify or delete it. This is how users extend the workspace safely.
 
 Run `Setup-PowerPlatformWorkspace.ps1 -VerifyRoot <workspace>` to list drift (MISSING / CHANGED) against the manifest.
 
 ## Self-pruning is automatic - verify it, do not fight it
 
-On every update the installer **self-prunes**: any file it shipped in a previous version but no longer ships is removed automatically (it diffs the previous write-log against the new one, scoped to managed roots). It also removes two known legacy orphans (`.github/copilot/`, `.session-active`) that predate the manifest. It deliberately leaves `.github/hooks/` alone - that is VS Code's hooks folder and may hold the user's own files.
+On every update the installer **self-prunes**: any file it shipped in a previous version but no longer ships is removed automatically (it diffs the previous write-log against the new one, scoped to managed roots) and the deletion is committed. Two pre-manifest leftovers (`.github/copilot/`, `.session-active`) are removed only when their content is recognisably installer output; otherwise they are reported and left. It deliberately leaves `.github/hooks/` alone - that is VS Code's hooks folder and may hold the user's own files. Refreshing the skills clone stashes any local edits first (`installer-autostash <stamp>`, recoverable with `git stash list` / `stash pop`) and resets to upstream; it never discards them silently.
 
 - To trigger a clean-up, re-run the installer (or `-VerifyRoot` to preview).
 - A file the **user** created is never in our write-log, so the prune never touches it - confirm this when a user worries about a new file of theirs.
@@ -694,7 +862,7 @@ You are the Team Lead for **%%DEPT%%**. You take a scoped WORK ORDER from the Ma
 - Pull the solution (export -> unpack) when you need local source; edit the unpacked files; run `git diff` and summarise what changed. For live work follow the plugin SKILL.md (canvas: `sync_canvas` -> edit `.pa.yaml` -> `compile_canvas`).
 - Assign exactly **one** worker per artifact so two agents never write the same file or live object; give it a bounded scope; **validate the returned work yourself** (compile / pack succeeds, diff is what was asked, QA line complete, no raw `.zip` committed) before you report success upward. Do not sign off unreviewed worker output.
 - Pack + import only after confirming the target environment (`pac org who`) and holding that environment's approval token; **never import to Production without `confirm push to prod`**.
-- Escalate rather than exceed your remit: cross-type design or sequencing questions go to the Solution Architect; cross-artifact acceptance and the Production gate go to the Integration QA & Change Controller (via the Master when dispatched, directly when the user selected you).
+- Escalate rather than exceed your remit: cross-type design or sequencing questions go to **001 - Solution Architect**; cross-artifact acceptance and the Production gate go to **002 - Integration QA & Change Controller**. Both are in your `agents:` list: when the user selected you directly, dispatch them yourself; when the Master dispatched you, return `NEEDS ARCHITECT` / the QA request in your WORK RESULT and let the Master sequence it (it already owns the plan).
 
 ## Refusal and escalation
 
@@ -712,7 +880,7 @@ Send each worker exactly one WORK ORDER (format in `.github/agent-docs/working-f
 
 Microsoft's SKILL.md may say "invoke `canvas-screen-builder`" or use the `Task` tool: use the **dispatch name** from your team table above (e.g. `010-canvas-screen-builder`), never the bare Microsoft name, and its "waves of at most three", "compile after each wave" and "re-invoke the planner on Blocked" rules apply unchanged. Microsoft's `AskUserQuestion` / plan-approval steps become `NEEDS APPROVAL` in your WORK RESULT (with the plan attached) when you were dispatched; when the user selected you directly, ask them.
 
-When a worker returns `NEEDS APPROVAL` / `NEEDS INPUT` / `NEEDS ARCHITECT` / `OUT OF SCOPE`, relay the `request` upward unchanged in your own WORK RESULT. If a design or dependency question blocks you and the Master did not provide a plan, you may dispatch **001 - Solution Architect** yourself with the precise question, then continue.%%MCP%%
+When a worker returns `NEEDS APPROVAL` / `NEEDS INPUT` / `NEEDS ARCHITECT` / `OUT OF SCOPE`, relay the `request` upward unchanged in your own WORK RESULT. If a single design or dependency question blocks you and the Master did not provide a plan, you may dispatch **001 - Solution Architect** yourself with that precise question (it answers in place and never dispatches you back), then continue.%%MCP%%
 '@).Replace('%%DEPT%%', [string]$Agent.department).Replace('%%MCP%%', $mcpNote))
     }
     else {
@@ -780,6 +948,7 @@ function Read-WorkerFrontmatter ([string]$Path, [string]$FallbackName) {
     $name = $FallbackName
     $canEdit = $false
     $canExecute = $false
+    $hasToolsKey = $false
     $mcp = New-Object 'System.Collections.Generic.List[string]'
     try {
         $inFm = $false; $inTools = $false
@@ -788,7 +957,7 @@ function Read-WorkerFrontmatter ([string]$Path, [string]$FallbackName) {
             if (-not $inFm) { continue }
             if ($ln -match '^\s*name\s*:\s*(.+?)\s*$') { $name = $Matches[1].Trim().Trim('"').Trim("'") }
             $toolText = $null
-            if ($ln -match '^\s*tools\s*:\s*(.*)$') { $inTools = $true; $toolText = $Matches[1] }
+            if ($ln -match '^\s*tools\s*:\s*(.*)$') { $inTools = $true; $hasToolsKey = $true; $toolText = $Matches[1] }
             elseif ($inTools) {
                 if ($ln -match '^\s*-\s*(.+?)\s*$') { $toolText = $Matches[1] }
                 elseif ($ln -match '^\S') { $inTools = $false }
@@ -804,18 +973,23 @@ function Read-WorkerFrontmatter ([string]$Path, [string]$FallbackName) {
                     if (-not $mcp.Contains($s)) { $mcp.Add($s) }
                     continue
                 }
-                if ($tok -match '^(?i)(edit|write|create|multiedit|notebookedit)$') { $canEdit = $true; continue }
+                if ($tok -match '^(?i)(edit|write|create|multiedit|notebookedit|apply_patch)$') { $canEdit = $true; continue }
                 if ($tok -match '^(?i)(bash|execute|powershell|shell)$') { $canExecute = $true; continue }
             }
         }
     } catch { }
-    return [pscustomobject]@{ Name = $name; CanEdit = $canEdit; CanExecute = $canExecute; McpServers = @($mcp) }
+    # Microsoft omits `tools:` on some workers, which in its runtime means "inherit everything".
+    # We map that to a bounded default (read/search/edit/execute, no MCP) instead of read-only,
+    # so e.g. an architect that runs `node --version` or writes a plan file is not silently crippled.
+    if (-not $hasToolsKey) { $canEdit = $true; $canExecute = $true }
+    return [pscustomobject]@{ Name = $name; CanEdit = $canEdit; CanExecute = $canExecute; McpServers = @($mcp); HasToolsKey = $hasToolsKey }
 }
 
 # Build one hidden wrapper .agent.md that points at (never copies) a Microsoft worker.
 # Workers get the LEAN tier contract: the WORK ORDER is their complete brief, they
 # never delegate, cannot ask the user, and need a literal token for destructive work.
-function New-WorkerWrapperContent ([string]$RegisteredName, [string]$WorkerName, [string]$Plugin, [string]$WorkerRelPath, [bool]$CanEdit, [string[]]$McpServers, [bool]$CanExecute = $false) {
+function New-WorkerWrapperContent ([string]$RegisteredName, [string]$WorkerName, [string]$Plugin, [string]$WorkerRelPath, [bool]$CanEdit, [string[]]$McpServers, [bool]$CanExecute = $false, [string]$PluginRoot = '') {
+    if (-not $PluginRoot) { $PluginRoot = "power-platform-skills/plugins/$Plugin" }
     $tools = @('read', 'search')
     if ($CanEdit) { $tools += 'edit' }
     if ($CanExecute) { $tools += 'execute' }
@@ -836,20 +1010,30 @@ skills repo - follow them verbatim and never fork, summarise, or improvise them.
 - Your WORK ORDER from the Team Lead is your complete brief: do not re-run startup and do
   not re-read the flow documents. You cannot ask the user questions: if something is
   missing or needs approval, return it in your WORK RESULT (`NEEDS INPUT` / `NEEDS APPROVAL`).
-- Microsoft's file targets another agent runtime. Translate, do not copy: its `Task` tool
-  is a delegation you do NOT have (you never delegate - return `NEEDS INPUT` if the
-  procedure requires another agent); `AskUserQuestion` becomes `NEEDS INPUT`;
-  `${PLUGIN_ROOT}` is `%%PLUGINROOT%%`.
+- Microsoft's file targets another agent runtime. Translate, do not copy:
+  - `Task` / `Agent` (delegation) - you do NOT have it and never delegate; if the procedure
+    requires another agent, stop and return `NEEDS INPUT` naming the agent and what it should do.
+  - `AskUserQuestion` - return `NEEDS INPUT` with the exact question and options.
+  - `EnterPlanMode` / `ExitPlanMode` (plan approval) - write the plan in your result and return
+    `NEEDS APPROVAL` with it attached; resume only when re-dispatched with the approval.
+  - `TaskCreate` / `TaskUpdate` / `TaskList` / `TodoWrite` (task lists) - keep an inline
+    checklist in your working notes or plan file; there is no task tool.
+  - `Write` / `Edit` / `MultiEdit` / `apply_patch` - your `edit` tool; `Bash` - your `execute` tool.
+  - `Skill` tool / `<plugin>:<skill>` references (e.g. `mcs-assistant:publish-agent`) - read
+    `%%PLUGINROOT%%/skills/<skill>/SKILL.md` and follow it inline; you do not have a skill tool.
+  - `${PLUGIN_ROOT}` / `${CLAUDE_PLUGIN_ROOT}` / a `pluginRoot` looked up from
+    `plugin-paths.json` is `%%PLUGINROOT%%` (so `reference/x.md` means `%%PLUGINROOT%%/reference/x.md`).
 - Stay within the tools granted in your front matter (they mirror what Microsoft gave
-  this worker). Do not request anything broader; if the procedure needs a tool you do not
-  hold, stop and return `NEEDS INPUT` naming it.
+  this worker; when Microsoft declared none, you hold a bounded read/search/edit/execute
+  set and no MCP servers). Do not request anything broader; if the procedure needs a tool
+  you do not hold, stop and return `NEEDS INPUT` naming it.
 - Destructive actions need an explicit approval token in your WORK ORDER
   (`approvals granted: <token>`). Deleting or dropping any screen, control, flow, table,
   column, form, view, page or file counts as destructive even when the user asked for it
   in plain words - the user's phrasing is NOT the token. Without the token: stop, change
   nothing, return `NEEDS APPROVAL` with the exact action and a proposed token such as
   `APPROVED:DELETE:<artifact>`. Execute only what the token names.
-- Never edit files under `power-platform-skills/`. Never touch Production.
+- Never edit files under `%%PLUGINROOT%%` (read-only vendor clone). Never touch Production.
 
 ## Procedure
 
@@ -857,10 +1041,11 @@ skills repo - follow them verbatim and never fork, summarise, or improvise them.
    `%%WORKERPATH%%`
 2. Wherever it refers to `${PLUGIN_ROOT}`, resolve it to `%%PLUGINROOT%%`
    (so `${PLUGIN_ROOT}/references/Foo.md` means `%%PLUGINROOT%%/references/Foo.md`).
-3. Read every guide, template, and reference it points to before you act.
+3. Read the guides, templates and references it points to for the step you are on,
+   honouring its own "read X only if Y" conditions - do not pre-load every file.
 4. Validate your own change the way the file specifies (self-QA line, compile, tests).
 5. If the instruction file is missing, stop and return `FAILED` saying that
-   `power-platform-skills` needs a refresh (Workspace Maintainer) instead of guessing.
+   the vendor clone `%%PLUGINROOT%%` needs a refresh (Workspace Maintainer) instead of guessing.
 
 ## Scope boundary
 
@@ -882,7 +1067,7 @@ risks: <or none>
 request: <exact approval token, question, or correct owner - only when status is not DONE>
 ```
 '@
-    $body = $tpl.Replace('%%NAME%%', $WorkerName).Replace('%%REGISTERED%%', $RegisteredName).Replace('%%PLUGIN%%', $Plugin).Replace('%%WORKERPATH%%', $WorkerRelPath).Replace('%%PLUGINROOT%%', "power-platform-skills/plugins/$Plugin")
+    $body = $tpl.Replace('%%NAME%%', $WorkerName).Replace('%%REGISTERED%%', $RegisteredName).Replace('%%PLUGIN%%', $Plugin).Replace('%%WORKERPATH%%', $WorkerRelPath).Replace('%%PLUGINROOT%%', $PluginRoot)
     return $fm + $body
 }
 
@@ -905,10 +1090,10 @@ function Get-DiscoveryLeadDescriptors ($OrderedAgents, $ThreeDigitById) {
 # marker so pruning only ever touches discovery-generated files, never the 12 core
 # agents. Returns a summary.
 function Invoke-WorkerAgentDiscovery ([string]$WorkspaceRoot, $Leads) {
-    $pluginsRoot = Join-Path $WorkspaceRoot 'power-platform-skills\plugins'
     $agentsDir   = Join-Path $WorkspaceRoot '.github\agents'
     $res = [pscustomobject]@{ Skipped = $true; Wrappers = @(); LeadWorkers = @{} }
-    if (-not (Test-Path -LiteralPath $pluginsRoot)) { return $res }
+    $roots = Get-PluginRoots $WorkspaceRoot
+    if ($roots.Count -eq 0) { return $res }
     $res.Skipped = $false
     if (-not (Test-Path -LiteralPath $agentsDir)) { New-Item -ItemType Directory -Path $agentsDir -Force | Out-Null }
 
@@ -917,7 +1102,9 @@ function Invoke-WorkerAgentDiscovery ([string]$WorkspaceRoot, $Leads) {
         $names = @()
         $rosterRows = @()
         foreach ($plugin in $lead.Plugins) {
-            $agentsFolder = Join-Path $pluginsRoot (Join-Path $plugin 'agents')
+            if (-not $roots.Contains($plugin)) { continue }
+            $pluginRoot = [string]$roots[$plugin]
+            $agentsFolder = Join-Path $WorkspaceRoot (Join-Path ($pluginRoot -replace '/', '\') 'agents')
             if (-not (Test-Path -LiteralPath $agentsFolder)) { continue }
             foreach ($wf in @(Get-ChildItem -LiteralPath $agentsFolder -Filter '*.md' -File -ErrorAction SilentlyContinue)) {
                 $info = Read-WorkerFrontmatter $wf.FullName $wf.BaseName
@@ -926,9 +1113,9 @@ function Invoke-WorkerAgentDiscovery ([string]$WorkspaceRoot, $Leads) {
                 if (-not $slug) { continue }
                 $wrapperFile = "$($lead.Prefix)-sub-$slug.agent.md"
                 $registered = "$($lead.Prefix)-$slug"
-                $workerRel = "power-platform-skills/plugins/$plugin/agents/$($wf.Name)"
+                $workerRel = "$pluginRoot/agents/$($wf.Name)"
                 # Mirror the worker's OWN tools (Microsoft's least-privilege intent), never the Lead's MCP grants.
-                $content = New-WorkerWrapperContent $registered $workerName $plugin $workerRel ([bool]$info.CanEdit) @($info.McpServers) ([bool]$info.CanExecute)
+                $content = New-WorkerWrapperContent $registered $workerName $plugin $workerRel ([bool]$info.CanEdit) @($info.McpServers) ([bool]$info.CanExecute) $pluginRoot
                 Write-ManagedFile (Join-Path $agentsDir $wrapperFile) $content
                 [void]$wanted.Add($wrapperFile)
                 $res.Wrappers += ".github\agents\$wrapperFile"
@@ -944,7 +1131,13 @@ function Invoke-WorkerAgentDiscovery ([string]$WorkspaceRoot, $Leads) {
             $leadPath = Join-Path $agentsDir $lead.File
             if (Test-Path -LiteralPath $leadPath) {
                 $raw = [System.IO.File]::ReadAllText($leadPath)
-                $agentsLine = 'agents: ' + (ConvertTo-AgentYamlList $names)
+                # MERGE with the Lead's authored list (Architect / QA escalation targets), never overwrite it.
+                $existingAgents = @()
+                $curLine = [regex]::Match($raw, '(?m)^agents:\s*\[(.*)\]\s*$')
+                if ($curLine.Success) {
+                    foreach ($mm in [regex]::Matches($curLine.Groups[1].Value, "'((?:[^']|'')*)'")) { $v = $mm.Groups[1].Value -replace "''", "'"; if ($v -and $v -notmatch '^\d{3}-') { $existingAgents += $v } }
+                }
+                $agentsLine = 'agents: ' + (ConvertTo-AgentYamlList (@($existingAgents) + @($names) | Select-Object -Unique))
                 $patched = ([regex]'(?m)^agents:.*$').Replace($raw, { param($m) $agentsLine }, 1)
                 # Roster: the Lead must know its workers by DISPATCH name (Microsoft's SKILL.md uses the bare name).
                 $roster = @(
@@ -959,8 +1152,14 @@ function Invoke-WorkerAgentDiscovery ([string]$WorkspaceRoot, $Leads) {
             }
         }
     }
+    # Prune only files WE generated: three-digit lead prefix + "-sub-" AND our wrapper
+    # marker in the body. A user agent that merely contains "-sub-" in its name is kept.
     foreach ($f in @(Get-ChildItem -LiteralPath $agentsDir -Filter '*-sub-*.agent.md' -File -ErrorAction SilentlyContinue)) {
-        if (-not $wanted.Contains($f.Name)) { Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue }
+        if ($wanted.Contains($f.Name)) { continue }
+        if ($f.Name -notmatch '^\d{3}-sub-.+\.agent\.md$') { continue }
+        $head = (Get-Content -LiteralPath $f.FullName -TotalCount 12 -ErrorAction SilentlyContinue) -join "`n"
+        if ($head -notmatch 'Microsoft .+ worker \(delegated\)') { continue }
+        Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue
     }
     return $res
 }
@@ -975,7 +1174,9 @@ if ($EmitAgentsTo) {
     # Non-interactive generation mode (CI / tests): target folder is given.
     $rootPath = [System.IO.Path]::GetFullPath($EmitAgentsTo)
     if (-not (Test-Path -LiteralPath $rootPath)) { New-Item -ItemType Directory -Path $rootPath -Force | Out-Null }
-    Write-Host "  [emit mode] Generating into: $rootPath" -ForegroundColor Cyan
+    # A target that already carries our manifest is an UPDATE (prune, migration and refresh paths apply).
+    if (Test-Path -LiteralPath (Join-Path $rootPath '.github\installed-manifest.json')) { $updateMode = $true }
+    Write-Host "  [emit mode] Generating into: $rootPath$(if ($updateMode) { ' (update)' })" -ForegroundColor Cyan
 } else {
 
 $defaultName = "Power Platform"
@@ -1296,8 +1497,8 @@ if ($net10Root) {
         if (-not $psHost) { $psHost = "powershell" }
         try {
             Start-Process -FilePath $psHost -Wait -NoNewWindow -ArgumentList @(
-                "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $installerScript,
-                "-Channel", "10.0", "-InstallDir", $dotnetInstallDir, "-NoPath"
+                '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $installerScript + '"'),
+                '-Channel', '10.0', '-InstallDir', ('"' + $dotnetInstallDir + '"'), '-NoPath'
             )
         } catch {
             Write-Host "  .NET 10 SDK install failed: $($_.Exception.Message)" -ForegroundColor DarkGray
@@ -1510,39 +1711,42 @@ foreach ($d in $dirs) {
 Write-Host "`nFolder structure ready." -ForegroundColor Green
 if (-not $EmitAgentsTo) { Read-Host "`nPress Enter to continue..." }
 
-# -- STEP 4 - Clone / refresh the Microsoft skills repository -----------
+# -- STEP 4 - Clone / refresh the Microsoft vendor repositories ---------
 # Runs BEFORE agent generation so the skill paths written into each agent
 # resolve against the real upstream tree and worker discovery can see the
 # plugins. Emit mode (CI / tests) never touches the network and skips this.
-Show-Step 4 $totalSteps "Skills Repository"
-$skillsRepoPath = "$rootPath\power-platform-skills"
-if ($EmitAgentsTo) {
-    Write-Host "  [emit mode] Skills clone skipped (no network)." -ForegroundColor DarkGray
-} elseif (-not (Test-Path -LiteralPath $skillsRepoPath)) {
-    Write-Host "  Cloning microsoft/power-platform-skills from GitHub..."
-    Write-Host "  (this may take a minute depending on your connection)" -ForegroundColor DarkGray
-    $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-    try { & git clone https://github.com/microsoft/power-platform-skills.git "$skillsRepoPath" 2>$null | Out-Null } catch { }
-    $ErrorActionPreference = $prevEAP
-    if (Test-Path -LiteralPath "$skillsRepoPath\plugins") {
-        $head = (& git -C $skillsRepoPath log -1 --format='%h %cd' --date=short 2>$null)
-        Write-Host "  Skills cloned successfully ($head)." -ForegroundColor Green
+Show-Step 4 $totalSteps "Microsoft Vendor Repositories"
+foreach ($vendor in $vendorClones) {
+    $vendorPath = Join-Path $rootPath $vendor.Name
+    if ($EmitAgentsTo) {
+        Write-Host "  [emit mode] $($vendor.Name) clone skipped (no network)." -ForegroundColor DarkGray
+    } elseif (-not (Test-Path -LiteralPath $vendorPath)) {
+        Write-Host "  Cloning $($vendor.Url -replace '^https://github.com/', '' -replace '\.git$', '') from GitHub..."
+        Write-Host "  (this may take a minute depending on your connection)" -ForegroundColor DarkGray
+        $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        try { & git clone $vendor.Url "$vendorPath" 2>$null | Out-Null } catch { }
+        $ErrorActionPreference = $prevEAP
+        $marker = if ($vendor.Layout -eq 'plugins') { Join-Path $vendorPath 'plugins' } else { Join-Path $vendorPath 'skills' }
+        if (Test-Path -LiteralPath $marker) {
+            $head = (& git -C $vendorPath log -1 --format='%h %cd' --date=short 2>$null)
+            Write-Host "  $($vendor.Name) cloned successfully ($head)." -ForegroundColor Green
+        } else {
+            Write-Host "  Warning: could not clone $($vendor.Name). Its Lead will re-discover skills by keyword; re-run the installer when online." -ForegroundColor Yellow
+        }
+    } elseif ($updateMode) {
+        Write-Host "  $($vendor.Name)/ already exists - force-refreshing to upstream..." -ForegroundColor White
+        # The installer is authoritative for vendor code: the clone must always
+        # mirror published upstream. Update-VendorClone stashes any local edits
+        # (recoverable via 'git stash list') then hard-resets to the upstream commit.
+        if (Update-VendorClone $vendorPath $vendor.Name) {
+            Write-Host "  $($vendor.Name) mirrors upstream." -ForegroundColor Green
+        } else {
+            Write-Host "  Note: $($vendor.Name) could not be refreshed (offline or git error)." -ForegroundColor Yellow
+            Write-Host "  Inspect with 'git -C $($vendor.Name) status'." -ForegroundColor Yellow
+        }
     } else {
-        Write-Host "  Warning: could not clone skills repo. Agents will re-discover skills by keyword; re-run the installer when online." -ForegroundColor Yellow
+        Write-Host "  $($vendor.Name)/ already exists - skipping clone." -ForegroundColor Green
     }
-} elseif ($updateMode) {
-    Write-Host "  power-platform-skills/ already exists - force-refreshing to upstream..." -ForegroundColor White
-    # The installer is authoritative for vendor code: the clone must always
-    # mirror published upstream. Update-VendorClone stashes any local edits
-    # (recoverable via 'git stash list') then hard-resets to origin/HEAD.
-    if (Update-VendorClone $skillsRepoPath 'power-platform-skills') {
-        Write-Host "  Skills mirror upstream." -ForegroundColor Green
-    } else {
-        Write-Host "  Note: power-platform-skills could not be refreshed (offline or git error)." -ForegroundColor Yellow
-        Write-Host "  Inspect with 'git -C power-platform-skills status'." -ForegroundColor Yellow
-    }
-} else {
-    Write-Host "  power-platform-skills/ already exists - skipping clone." -ForegroundColor Green
 }
 
 # -- STEP 5 - Generate configuration files -----------------------------
@@ -1559,6 +1763,7 @@ node_modules/
 *.log
 *.user
 power-platform-skills/
+copilot-studio-plugin/
 .github/agent-docs/tool-status.json
 .github/agent-docs/guardrail-status.json
 .github/installed-manifest.json
@@ -1572,63 +1777,185 @@ $pacWorkflowsPath = "$rootPath\scripts\pac-workflows.ps1"
 if ($updateMode -or -not (Test-Path $pacWorkflowsPath)) {
     $pacWorkflowsContent = @'
 # Power Platform PAC CLI helper workflows
-# Used by Power Platform Master Agent - can also be run manually
+# Used by Power Platform Master Agent - can also be run manually.
+#
+# Safety model:
+#   * Every pac / git step is exit-code checked; the script stops at the first failure
+#     and never commits after a failed step.
+#   * Paths are anchored to THIS workspace (the script's own location), never to the
+#     caller's current directory, and names cannot contain path separators or '..'.
+#   * The push package is built fresh (any previous zip is deleted first) so a failed
+#     pack can never import yesterday's package.
+#   * The REAL target is resolved from `pac org who` and pinned on every remote
+#     command. For push/pull it must match the environment map or -EnvironmentUrl;
+#     an unmapped label is refused (no "whatever profile is active" imports).
+#   * Production is classified from the environment map (`.github/agent-docs/environments.json`,
+#     user-owned) or `-EnvironmentUrl`; the name heuristic ('prod' in label/URL/name) is a
+#     supplementary guard, not the gate. A push to Production needs -ConfirmProd.
+#   * After import the solution is verified by exact unique name in `pac solution list --json`.
+#   * Only the solution's own folder is staged and committed, never the whole workspace.
 
 param(
-  [string]$Action,       # pull | push | init
+  [ValidateSet('pull', 'push', 'init')]
+  [string]$Action,
   [string]$SolutionName,
-  [string]$Environment,  # DEV | TEST | PROD
+  [string]$Environment,        # DEV | TEST | PROD  (local folder label; mapped to a URL in environments.json)
+  [string]$EnvironmentUrl,     # explicit https://<org>.crm.dynamics.com target - verified against `pac org who`
   [string]$PackageType = "Unmanaged",
   [string]$PublisherName = "PowerPlatformDev",
   [string]$PublisherPrefix = "pp",
-  [switch]$ConfirmProd   # required for 'push' when $Environment is PROD
+  [switch]$ConfirmProd         # required for 'push' when the verified target is Production
 )
 
-# -- Code-level Production gate (the agents' 'confirm push to prod' rule, enforced) --
-if ($Action -eq 'push' -and $Environment -match '^(?i)prod' -and -not $ConfirmProd) {
-    Write-Host "BLOCKED: pushing to a Production environment requires -ConfirmProd (the user must have typed 'confirm push to prod')." -ForegroundColor Red
-    exit 2
+$ErrorActionPreference = 'Stop'
+function Fail([string]$Message, [int]$Code = 1) { Write-Host "ERROR: $Message" -ForegroundColor Red; exit $Code }
+function Invoke-Step([string]$What, [scriptblock]$Command) {
+    Write-Host "  > $What" -ForegroundColor DarkGray
+    & $Command
+    if ($LASTEXITCODE -ne 0) { Fail "$What failed (exit $LASTEXITCODE). Nothing was committed." $LASTEXITCODE }
 }
+# Native commands write progress to stderr; capture stdout only and judge by exit code.
+function Invoke-Native([string[]]$CommandLine) {
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = (& $CommandLine[0] @($CommandLine[1..($CommandLine.Count - 1)]) 2>$null | Out-String); $code = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    return [pscustomobject]@{ Output = $out; Exit = $code }
+}
+
+if ([string]::IsNullOrWhiteSpace($Action) -or [string]::IsNullOrWhiteSpace($SolutionName) -or [string]::IsNullOrWhiteSpace($Environment)) {
+    Fail "Usage: pac-workflows.ps1 -Action pull|push|init -SolutionName <name> -Environment <DEV|TEST|PROD> [-EnvironmentUrl <url>] [-ConfirmProd]"
+}
+foreach ($nm in @($SolutionName, $Environment)) {
+    if ($nm -match '[\\/:*?"<>|]' -or $nm -eq '.' -or $nm -eq '..' -or $nm -match '^\.|\.$|\s') { Fail "SolutionName / Environment must be plain names (letters, digits, - _), no path characters or dots." }
+}
+
+# -- Anchor every path to the workspace root (scripts/ sits directly under it) ----------
+$workspaceRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+if (-not (Test-Path -LiteralPath (Join-Path $workspaceRoot '.github\agents'))) { Fail "This script must live in <workspace>\scripts\ (no .github\agents next to it): $workspaceRoot" }
+Set-Location -LiteralPath $workspaceRoot
+$exportsPath = Join-Path $workspaceRoot 'exports'
+$deployPath  = Join-Path $workspaceRoot 'deploy'
+$solutionDir = Join-Path (Join-Path $workspaceRoot $Environment) $SolutionName
+$solutionRel = "$Environment/$SolutionName"
+if (-not ([System.IO.Path]::GetFullPath($solutionDir)).StartsWith($workspaceRoot, [System.StringComparison]::OrdinalIgnoreCase)) { Fail "Resolved solution path escapes the workspace." }
 
 # -- Verify git identity is configured (required for commits) ----------
-$gitUser  = git config user.name  2>$null
-$gitEmail = git config user.email 2>$null
+$gitUser  = (Invoke-Native @('git', 'config', 'user.name')).Output.Trim()
+$gitEmail = (Invoke-Native @('git', 'config', 'user.email')).Output.Trim()
 if ([string]::IsNullOrWhiteSpace($gitUser) -or [string]::IsNullOrWhiteSpace($gitEmail)) {
-    Write-Host "ERROR: git user.name and user.email must be configured before committing." -ForegroundColor Red
     Write-Host "  Run:  git config --global user.name 'Your Name'" -ForegroundColor Yellow
     Write-Host "  Run:  git config --global user.email 'you@example.com'" -ForegroundColor Yellow
-    exit 1
+    Fail "git user.name and user.email must be configured before committing."
+}
+$inRepo = Invoke-Native @('git', 'rev-parse', '--is-inside-work-tree')
+if ($inRepo.Exit -ne 0) { Fail "$workspaceRoot is not a git repository." }
+
+# -- Environment map: label -> { url, production } (user-owned, optional) ---------------
+# .github/agent-docs/environments.json, e.g.
+#   { "DEV":  { "url": "https://orgdev.crm.dynamics.com",  "production": false },
+#     "PROD": { "url": "https://orgprod.crm.dynamics.com", "production": true } }
+$envMapPath = Join-Path $workspaceRoot '.github\agent-docs\environments.json'
+$envEntry = $null
+if (Test-Path -LiteralPath $envMapPath) {
+    try { $envMap = Get-Content -LiteralPath $envMapPath -Raw -Encoding UTF8 | ConvertFrom-Json } catch { Fail "environments.json is not valid JSON: $($_.Exception.Message)" }
+    $prop = $envMap.PSObject.Properties | Where-Object { $_.Name -ieq $Environment } | Select-Object -First 1
+    if ($prop) { $envEntry = $prop.Value }
+}
+$expectedUrl = $null
+if ($EnvironmentUrl) { $expectedUrl = $EnvironmentUrl.TrimEnd('/') }
+elseif ($envEntry -and $envEntry.url) { $expectedUrl = ([string]$envEntry.url).TrimEnd('/') }
+
+# -- Resolve and verify the REAL target (pull/push only; init is local) --
+$activeUrl = $null; $who = ''
+if ($Action -ne 'init') {
+    $whoRes = Invoke-Native @('pac', 'org', 'who')
+    $who = $whoRes.Output
+    if ($whoRes.Exit -ne 0 -or $who -notmatch 'https://[^\s]+') { Fail "No active pac environment. Run 'pac auth list' / 'pac org select --environment <url>' first." 3 }
+    $activeUrl = ($Matches[0]).TrimEnd('/')
+    if (-not $expectedUrl) {
+        Fail "Label '$Environment' is not mapped to an environment. Pass -EnvironmentUrl <url> or add the label to .github/agent-docs/environments.json. Refusing to use whatever profile happens to be active ($activeUrl)." 5
+    }
+    if ($activeUrl -ne $expectedUrl) {
+        Fail "Active pac environment is $activeUrl but '$Environment' expects $expectedUrl. Select the right environment (pac org select --environment $expectedUrl) and retry." 4
+    }
+    Write-Host "  Target environment: $activeUrl (label: $Environment)" -ForegroundColor DarkGray
 }
 
-$exportsPath = "./exports"
-$srcPath     = "./$Environment"
-$deployPath  = "./deploy"
+# -- Production gate: map classification first, name heuristic as a supplementary guard --
+$isProdMapped = ($null -ne $envEntry) -and ($envEntry.PSObject.Properties['production']) -and ([bool]$envEntry.production)
+$labelIsProd  = $Environment -match '(?i)^prod'
+$orgLooksProd = ($null -ne $activeUrl) -and (($activeUrl -match '(?i)prod') -or ($who -match '(?im)^\s*(Org|Environment|Friendly)\s*(Name|Display)?[^\r\n]*\bprod'))
+$unclassified = ($Action -eq 'push') -and ($null -eq $envEntry) -and -not $labelIsProd -and -not $orgLooksProd
+if ($Action -eq 'push' -and ($isProdMapped -or $labelIsProd -or $orgLooksProd) -and -not $ConfirmProd) {
+    Write-Host "BLOCKED: this push targets a Production environment (label '$Environment', org $activeUrl)." -ForegroundColor Red
+    Write-Host "         Re-run with -ConfirmProd only after the user has typed 'confirm push to prod'." -ForegroundColor Red
+    exit 2
+}
+if ($unclassified) {
+    Write-Host "  NOTE: '$Environment' has no entry in environments.json, so its Production status is unknown; proceeding because -EnvironmentUrl was given explicitly. Add it to the map to make this deterministic." -ForegroundColor Yellow
+}
+
+function Test-SolutionListed([string]$Name, [string]$Url) {
+    $list = Invoke-Native @('pac', 'solution', 'list', '--environment', $Url, '--json')
+    if ($list.Exit -ne 0) { return 'list-failed' }
+    # PS 5.1 ConvertFrom-Json emits a JSON array as ONE Object[]; the ForEach-Object unrolls it.
+    try { $items = @($list.Output | ConvertFrom-Json | ForEach-Object { $_ }) } catch { return 'unparseable' }
+    if ($items.Count -eq 1 -and $items[0].PSObject.Properties['value']) { $items = @($items[0].value | ForEach-Object { $_ }) }  # tolerate a {"value":[...]} envelope
+    foreach ($it in $items) {
+        $u = $null
+        foreach ($k in 'SolutionUniqueName', 'UniqueName', 'uniquename') { if ($it.PSObject.Properties[$k]) { $u = [string]$it.$k; break } }
+        if ($u -and $u -eq $Name) { return 'present' }
+    }
+    return 'absent'
+}
 
 switch ($Action) {
   "pull" {
-    Write-Host "Exporting $SolutionName from $Environment..."
-    pac solution export --name $SolutionName --path "$exportsPath/$SolutionName.zip"
-    pac solution unpack --zipfile "$exportsPath/$SolutionName.zip" --folder "$srcPath/$SolutionName"
-    git add .
-    git commit -m "chore: pull $SolutionName from $Environment"
-    Write-Host "Pull complete."
+    Write-Host "Exporting $SolutionName from $Environment ($activeUrl)..."
+    $zip = Join-Path $exportsPath "$SolutionName.zip"
+    New-Item -ItemType Directory -Path $exportsPath -Force | Out-Null
+    if (Test-Path $zip) { Remove-Item $zip -Force }
+    Invoke-Step "pac solution export" { pac solution export --name $SolutionName --path $zip --environment $activeUrl }
+    if (-not (Test-Path $zip)) { Fail "Export reported success but $zip is missing." }
+    Invoke-Step "pac solution unpack" { pac solution unpack --zipfile $zip --folder $solutionDir }
+    if (-not (Test-Path (Join-Path $solutionDir 'Other\Solution.xml'))) { Fail "Unpack did not produce $solutionRel/Other/Solution.xml." }
+    Invoke-Step "git add $solutionRel" { git add -- $solutionRel }
+    $staged = Invoke-Native @('git', 'diff', '--cached', '--name-only', '--', $solutionRel)
+    if ($staged.Exit -ne 0) { Fail "git diff --cached failed (exit $($staged.Exit))." }
+    if ($staged.Output.Trim()) { Invoke-Step "git commit" { git commit -m "chore: pull $SolutionName from $Environment" -- $solutionRel } }
+    else { Write-Host "  No changes to commit (local source already matches the export)." -ForegroundColor DarkGray }
+    Write-Host "Pull complete." -ForegroundColor Green
   }
   "push" {
+    if (-not (Test-Path (Join-Path $solutionDir 'Other\Solution.xml'))) { Fail "$solutionRel is not an unpacked solution (Other/Solution.xml missing). Pull it first." }
     Write-Host "Packing $SolutionName..."
-    pac solution pack --zipfile "$deployPath/$SolutionName.zip" --folder "$srcPath/$SolutionName" --packagetype $PackageType
-    Write-Host "Importing to $Environment..."
-    pac solution import --path "$deployPath/$SolutionName.zip"
-    git add .
-    git commit -m "feat: push $SolutionName to $Environment"
-    Write-Host "Push complete."
+    $zip = Join-Path $deployPath "$SolutionName.zip"
+    New-Item -ItemType Directory -Path $deployPath -Force | Out-Null
+    if (Test-Path $zip) { Remove-Item $zip -Force }   # never import a stale package
+    Invoke-Step "pac solution pack" { pac solution pack --zipfile $zip --folder $solutionDir --packagetype $PackageType }
+    if (-not (Test-Path $zip)) { Fail "Pack reported success but $zip is missing." }
+    Write-Host "Importing to $Environment ($activeUrl)..."
+    Invoke-Step "pac solution import" { pac solution import --path $zip --environment $activeUrl }
+    switch (Test-SolutionListed $SolutionName $activeUrl) {
+        'present'     { }
+        'absent'      { Fail "Import returned success but '$SolutionName' is not listed in $activeUrl. Inspect the environment before retrying; the import may have partially applied." 6 }
+        default       { Fail "Import completed but post-import verification could not run (pac solution list failed). Verify '$SolutionName' in $activeUrl manually before committing." 7 }
+    }
+    Invoke-Step "git add $solutionRel" { git add -- $solutionRel }
+    $staged = Invoke-Native @('git', 'diff', '--cached', '--name-only', '--', $solutionRel)
+    if ($staged.Exit -ne 0) { Fail "git diff --cached failed (exit $($staged.Exit))." }
+    if ($staged.Output.Trim()) { Invoke-Step "git commit" { git commit -m "feat: push $SolutionName to $Environment" -- $solutionRel } }
+    else { Write-Host "  No source changes to commit." -ForegroundColor DarkGray }
+    Write-Host "Push complete." -ForegroundColor Green
   }
   "init" {
     Write-Host "Initialising new solution $SolutionName (publisher $PublisherName / prefix $PublisherPrefix)..."
-    New-Item -ItemType Directory -Path "$srcPath/$SolutionName" -Force
-    pac solution init --publisher-name $PublisherName --publisher-prefix $PublisherPrefix --output-directory "$srcPath/$SolutionName"
-    git add .
-    git commit -m "chore: init solution $SolutionName"
-    Write-Host "Init complete."
+    if (Test-Path $solutionDir) { Fail "$solutionRel already exists - refusing to overwrite." }
+    New-Item -ItemType Directory -Path $solutionDir -Force | Out-Null
+    Invoke-Step "pac solution init" { pac solution init --publisher-name $PublisherName --publisher-prefix $PublisherPrefix --output-directory $solutionDir }
+    Invoke-Step "git add $solutionRel" { git add -- $solutionRel }
+    Invoke-Step "git commit" { git commit -m "chore: init solution $SolutionName" -- $solutionRel }
+    Write-Host "Init complete." -ForegroundColor Green
   }
 }
 '@
@@ -1667,6 +1994,7 @@ foreach ($entry in $orderedAgents) {
 # =====================================================================
 $bt = [string][char]96
 $PS = 'power-platform-skills/plugins'
+$CSP = 'copilot-studio-plugin'
 $CS = '.github/skills'
 $AD = '.github/agent-docs'
 
@@ -1693,7 +2021,7 @@ $agentKnowledge = @{
     'solution-architect' = @{
         skills = @(
             @{ ref = "$AD/working-flow-reference.md"; why = 'team protocol, two authoring models, promotion path' },
-            @{ ref = "$PS/power-pages/skills/plan-alm"; why = 'ALM / environment promotion planning patterns (apply beyond Pages)' },
+            @{ ref = "$PS/power-pages/skills/plan-alm"; why = 'worked example of ALM / environment promotion planning (written for Pages sites - take the pattern, not the Pages-specific steps; the generic pac path is in working-flow-reference.md)' },
             @{ ref = "$PS/canvas-apps/skills/canvas-app"; why = 'what canvas authoring can and cannot do (plan realistically)' },
             @{ ref = "$PS/power-automate/references/definition-reference.md"; why = 'flow definition shape and connection references' },
             @{ ref = "$PS/model-apps/skills/app-builder"; why = 'model-driven app / Dataverse schema design' },
@@ -1739,11 +2067,11 @@ $agentKnowledge = @{
         )
         playbook = @(
             'Run the status script first; it tells you freshness, registrations, nested dispatch and tool availability.',
-            'Light maintenance: mirror the skills clone from upstream (stash-then-reset), re-register skill folders, refresh tool-status.json.',
+            'Light maintenance: mirror both vendor clones (power-platform-skills, copilot-studio-plugin) from upstream (stash-then-reset), re-register skill folders, refresh tool-status.json.',
             'Deep maintenance: light + `-VerifyRoot` drift report, mcp.json / settings.json check, worker-wrapper freshness (re-run the installer when Microsoft added or removed workers).',
             'Explain the authoritative-overwrite contract; steer user edits into NEW files under .github/.'
         )
-        validate = @('After a refresh: `git -C power-platform-skills status` is clean and HEAD equals origin/HEAD.', 'settings.json still parses and contains chat.subagents.allowInvocationsFromSubagents = true.')
+        validate = @('After a refresh: `git -C power-platform-skills status` and `git -C copilot-studio-plugin status` are clean and each HEAD equals its origin/HEAD.', 'settings.json still parses and contains chat.subagents.allowInvocationsFromSubagents = true.')
         tools = @('execute for git / pac / dnx / node / az probes; edit only for .vscode/*, .github/skills/* and .github/agent-docs/tool-status.json.')
         avoid = @('Editing user solution source or the vendor clone.', 'Softening the installer contract.', 'Hand-editing the generated *-sub-*.agent.md wrappers.')
     }
@@ -1827,8 +2155,8 @@ $agentKnowledge = @{
             'Deploy only with the environment token.'
         )
         validate = @('npm run build succeeds; TypeScript compiles; the deployed app opens.')
-        tools = @('pac code + npm / Vite (plugin CLI flow). microsoft-learn for current guidance.')
-        avoid = @('Deploying to a shared environment without the token.', 'Committing node_modules or .env.')
+        tools = @('npm / Vite + the Power Apps CLI installed by the template (`@microsoft/power-apps-cli`): resolve `pa` vs `power-apps` per code-apps/shared/cli-binary.md and ALWAYS call it as `npx --no-install pa ...` from the project folder (never bare `npx pa`). Needs Node.js 22+ (the installer only guarantees 18+ for the flow MCP - check `node --version` first). microsoft-learn for current guidance.')
+        avoid = @('Deploying to a shared environment without the token.', 'Committing node_modules or .env.', 'Guessing a CLI verb - `pa` and `power-apps` have different verb paths; use the mapping table.')
     }
     'model-apps-lead' = @{
         skills = @(
@@ -1865,8 +2193,8 @@ $agentKnowledge = @{
             'Offline profiles change what syncs to devices - preview the scope and get the token before assigning users.',
             'Native extensions (.ppmplugin): design first, then generate, build, assemble, audit, in the order the extension skills define. Some steps need JDK / Android SDK / Xcode - check tool-status.json and say what is missing.'
         )
-        validate = @('npm run dev starts clean; preview-screens renders; deploy succeeds; for extensions the audit skill reports no CRITICAL findings.')
-        tools = @('Expo / npm / pac (plugin CLI flow); JDK + Android SDK / Xcode for native binaries. microsoft-learn for current guidance.')
+        validate = @('npm run dev starts clean; preview-screens renders; for a deploy task the deploy skill''s own verification passes (both platform bundles present); for extensions the audit skill reports no CRITICAL findings. Deploying is NOT part of validating an edit.')
+        tools = @('Expo / npm (Node.js 22+, npm 10+ per mobile-apps/shared/version-check.md - the installer only guarantees Node 18+) / pac; JDK + Android SDK / Xcode for native binaries. microsoft-learn for current guidance.')
         avoid = @('Assigning an offline profile to users without the token.', 'Shipping an unaudited .ppmplugin.')
     }
     'mcp-apps-lead' = @{
@@ -1875,26 +2203,27 @@ $agentKnowledge = @{
             @{ ref = "$PS/mcp-apps/references/mcp-apps-reference.md"; why = 'MCP Apps spec and constraints' },
             @{ ref = "$PS/mcp-apps/references/design-guidelines.md"; why = 'visual guidelines' }
         )
-        playbook = @('Get the tool''s test output from the user (NEEDS INPUT if missing), then follow generate-mcp-app-ui.')
-        validate = @('The widget renders the sample payload; no external network dependencies.')
+        playbook = @('Get the tool''s test output from the user (NEEDS INPUT if missing), then follow generate-mcp-app-ui. The skill supports two runtime modes - bundled code or user-approved public CDN imports; carry the user''s CDN policy into the WORK ORDER, and if none was given let the skill ask (return NEEDS INPUT).')
+        validate = @('The widget renders the sample payload; it is a single self-contained .html; network imports exist only when the user approved the CDN policy.')
         tools = @('read/search/edit; microsoft-learn for current guidance.')
         avoid = @('Inventing tool schemas the user did not provide.')
     }
     'solution-alm-environments-lead' = @{
         skills = @(
-            @{ ref = 'scripts/pac-workflows.ps1'; why = 'pull / push / init helper (push to PROD requires -ConfirmProd)' },
-            @{ ref = "$AD/working-flow-reference.md"; why = 'PULL / PUSH / SYNC / COMPARE / NEW capabilities and their tokens' },
-            @{ ref = "$PS/power-pages/skills/export-solution"; why = 'export patterns (apply to any solution)' },
-            @{ ref = "$PS/power-pages/skills/import-solution"; why = 'import patterns and pre-checks' },
-            @{ ref = "$PS/power-pages/skills/setup-solution"; why = 'publisher / solution setup' },
-            @{ ref = "$PS/power-pages/skills/plan-alm"; why = 'environment strategy and promotion' },
-            @{ ref = "$PS/power-pages/skills/setup-pipeline"; why = 'pipelines host and setup' },
+            @{ ref = 'scripts/pac-workflows.ps1'; why = 'THE pull / push / init helper for any solution: verifies the target, enforces the Production gate, commits only the solution folder' },
+            @{ ref = "$AD/working-flow-reference.md"; why = 'PULL / PUSH / SYNC / COMPARE / NEW capabilities, the generic pac commands and their tokens (authoritative for non-Pages solutions)' },
+            @{ ref = "$PS/power-pages/skills/export-solution"; why = 'Pages-flavoured export walkthrough - reuse the pre-checks, ignore the site-specific steps' },
+            @{ ref = "$PS/power-pages/skills/import-solution"; why = 'Pages-flavoured import walkthrough and pre-checks (same caveat)' },
+            @{ ref = "$PS/power-pages/skills/setup-solution"; why = 'publisher / solution setup example' },
+            @{ ref = "$PS/power-pages/skills/plan-alm"; why = 'environment strategy and promotion example' },
+            @{ ref = "$PS/power-pages/skills/setup-pipeline"; why = 'Power Platform pipelines host and setup' },
             @{ ref = "$PS/power-pages/skills/deploy-pipeline"; why = 'running a deployment pipeline' },
             @{ ref = "$PS/power-pages/skills/diagnose-deployment"; why = 'deployment failure diagnosis' },
-            @{ ref = "$PS/power-pages/references/deployment-error-catalog.md"; why = 'import / deployment error catalog' }
+            @{ ref = "$PS/power-pages/references/deployment-error-catalog.md"; why = 'import / deployment error catalog (pac errors are the same for every solution type)' }
         )
         playbook = @(
             'Always `pac auth list` + `pac org who` first; state the environment you are about to touch.',
+            'Prefer `scripts/pac-workflows.ps1` for pull / push / init: it verifies the active org against the label (environments.json or -EnvironmentUrl), refuses unmapped targets, enforces -ConfirmProd, verifies the import by unique name and commits only the solution folder. Map labels once in `.github/agent-docs/environments.json` (`{ "DEV": { "url": "https://...", "production": false } }`).',
             'PULL: export -> unpack into <Env>/<Solution>/; overwrite of local edits needs `APPROVED:OVERWRITE:<env>/<solution>`.',
             'PUSH: pack -> import; TEST/UAT needs `APPROVED:IMPORT:<env>/<solution>`; Production needs the user''s literal `confirm push to prod` AND a QA VERDICT of ACCEPT.',
             'SYNC: filter out managed and Microsoft / system publishers, show the list, pull only what the user picked (`APPROVED:SYNC:<env>` for more than one).',
@@ -1905,11 +2234,38 @@ $agentKnowledge = @{
         tools = @('pac solution / pac org / pac auth (exact path from tool-status.json); scripts/pac-workflows.ps1. microsoft-learn for current guidance.')
         avoid = @('Importing anywhere without the matching token.', 'Pulling every solution in an environment.', 'Switching the active pac profile without restoring it.')
     }
+    'copilot-studio-lead' = @{
+        skills = @(
+            @{ ref = "$CSP/skills/create-agent"; why = 'new MCS2 agent + PAC-connected workspace (`pac copilot init`), instructions-only or guided design' },
+            @{ ref = "$CSP/skills/clone-agent"; why = 'bring an existing cloud agent into a local workspace (`pac copilot clone`)' },
+            @{ ref = "$CSP/skills/pull-agent"; why = 'sync remote changes into the workspace before editing' },
+            @{ ref = "$CSP/skills/push-agent"; why = 'pull-before-push upload of local YAML changes' },
+            @{ ref = "$CSP/skills/publish-agent"; why = 'make the cloud draft live - needs the token' },
+            @{ ref = "$CSP/skills/delete-agent"; why = 'destructive - needs `APPROVED:DELETE:<agent>`' },
+            @{ ref = "$CSP/skills/add-knowledge"; why = 'knowledge sources (SharePoint, websites, uploaded files)' },
+            @{ ref = "$CSP/skills/add-skill"; why = 'inline / uploaded agent skills under behaviors/' },
+            @{ ref = "$CSP/reference/knowledge-schema.md"; why = 'authoritative knowledge-source YAML schema' },
+            @{ ref = "$CSP/reference/skill-schema.md"; why = 'authoritative skill YAML schema' }
+        )
+        playbook = @(
+            'The unit of work is an MCS2 agent workspace (settings.mcs.yml, agent.sync.yaml, behaviors/, capabilities/, infrastructure/, .mcs/). Resolve it first (project dir or its .mcs/conn.json); never hand-edit .mcs/.',
+            'New agent from a description: dispatch Microsoft''s Copilot Studio Architect worker with the initialized project dir + behaviour description; it writes the YAML and never packs or publishes. Migrating a classic agent: Describer first (behaviour report), then Architect.',
+            'ALM (list / pull / push / publish / delete): follow the matching SKILL.md step by step (the Manage worker routes to them). Push is pull-before-push; a no-op push is not publish readiness.',
+            'Publish makes the agent live for its users -> treat as a shared-environment action: `APPROVED:PUBLISH:<agent>@<env>`. Delete -> `APPROVED:DELETE:<agent>`. Production environments keep `confirm push to prod`.',
+            'Every authored *.mcs.yml must follow its schema and carry mcs.metadata; validate against reference/*.md before pushing. Review `git diff` of the workspace and say what changed.',
+            'Needs pac CLI 2.9.3+ with `pac copilot` (check `pac copilot init --help`); the environment is an ID or Dataverse URL - never silently the active profile''s default.'
+        )
+        validate = @('`pac copilot push` succeeds and the final `pac copilot pull` leaves the workspace clean; every new component has mcs.metadata and a schema-valid shape; no `.mcs/` edits; publish ran only with the token.')
+        tools = @('pac copilot (init / clone / pull / push / publish / delete / list) via the exact pac path in tool-status.json; read/search/edit for the YAML workspace. microsoft-learn for current Copilot Studio guidance.')
+        avoid = @('Publishing or deleting without the literal token.', 'Running `pac copilot publish` from the create flow (the publish skill owns the confirmation).', 'Editing `.mcs/` or `agent.sync.yaml` by hand.', 'Inventing connector / tool metadata the user did not provide.')
+    }
 }
 
 # Keyword hints per agent for auto-discovering NEW upstream skills (name hit = 2,
 # description hit = 1; threshold 2) so Microsoft additions attach on the next run
-# without a catalog edit.
+# without a catalog edit. Matching is SCOPED: a Lead only sees skills from its own
+# plugins ($agentSkillScope), so a keyword like 'dataverse' or 'deploy' cannot pull
+# another team's skill into its list. Executives see every plugin (advisory reads).
 $agentSkillKeywords = @{
     'solution-architect'              = @('plan', 'alm', 'setup-solution', 'datamodel', 'architecture')
     'integration-qa-change-controller'= @('security', 'audit', 'scan', 'permissions', 'test', 'diagnose')
@@ -1919,15 +2275,35 @@ $agentSkillKeywords = @{
     'power-pages-lead'                = @('site', 'pages', 'webapi', 'webroles', 'seo', 'firewall', 'headers', 'bootstrap', 'auth', 'server-logic', 'cloud-flow', 'env-variables')
     'code-apps-lead'                  = @('code-app', 'code app', 'connector', 'dataverse', 'sharepoint', 'teams', 'office365', 'onedrive', 'excel', 'azuredevops', 'workiq', 'mcscopilot', 'connections')
     'model-apps-lead'                 = @('model-driven', 'genpage', 'generative', 'app-builder', 'forms', 'views', 'sitemap')
-    'mobile-apps-lead'                = @('mobile', 'offline', 'native', 'expo', 'wrap', 'ppmplugin', 'pcf', 'android', 'ios', 'design-system', 'preview', 'sample-data', 'app-registration')
+    'mobile-apps-lead'                = @('mobile', 'offline', 'native', 'expo', 'wrap', 'ppmplugin', 'pcf', 'android', 'ios', 'design-system', 'preview', 'sample-data', 'app-registration', 'app-insights')
     'mcp-apps-lead'                   = @('mcp app', 'mcp-app', 'widget')
     'solution-alm-environments-lead'  = @('solution', 'export', 'import', 'pipeline', 'deploy', 'alm', 'environment', 'publisher')
+    'copilot-studio-lead'             = @('copilot studio', 'copilot-studio', 'mcs', 'agent', 'knowledge', 'publish', 'clone', 'pull', 'push', 'topic', 'evaluation')
+}
+# Plugin scope per agent (plugin ids from Get-PluginRoots). Leads default to their
+# manifest primarySkills; the ALM Lead draws on the Pages ALM skills; executives are
+# unscoped. The scope is what keeps a broad keyword like 'agent' inside its own vendor.
+$agentSkillScope = @{
+    'solution-alm-environments-lead' = @('power-pages')
+}
+foreach ($la in $agentManifest.agents) {
+    if ($la.level -eq 'team-lead' -and -not $agentSkillScope.ContainsKey($la.id)) {
+        $sc = @($la.primarySkills | Where-Object { $_ })
+        if ($sc.Count -gt 0) { $agentSkillScope[$la.id] = $sc }
+    }
 }
 
 # Index every upstream skill once (folder, name, description) for keyword matching.
+$pluginRoots = Get-PluginRoots $rootPath
 $upstreamSkillIndex = @()
-foreach ($containerRel in @(Get-SkillContainerDirs -RootPath $rootPath -SearchSubPaths @('power-platform-skills\plugins'))) {
+foreach ($containerRel in @(Get-SkillContainerDirs -RootPath $rootPath -SearchSubPaths $vendorSkillSearchPaths)) {
     $containerFull = Join-Path $rootPath ($containerRel -replace '/', '\')
+    # Plugin id = the plugin root this container sits under (longest match wins).
+    $pluginName = $null
+    foreach ($plid in @($pluginRoots.Keys | Sort-Object { $pluginRoots[$_].Length } -Descending)) {
+        if ($containerRel -eq $pluginRoots[$plid] -or $containerRel.StartsWith("$($pluginRoots[$plid])/")) { $pluginName = $plid; break }
+    }
+    if (-not $pluginName) { $pluginName = ($containerRel -split '/')[0] }
     Get-ChildItem -LiteralPath $containerFull -Directory -ErrorAction SilentlyContinue | ForEach-Object {
         $skillFile = Join-Path $_.FullName 'SKILL.md'
         if (-not (Test-Path -LiteralPath $skillFile)) { return }
@@ -1937,13 +2313,15 @@ foreach ($containerRel in @(Get-SkillContainerDirs -RootPath $rootPath -SearchSu
         $nameM = [regex]::Match($fmText, '(?m)^name:\s*["'']?([^\r\n"'']+)')
         $descM = [regex]::Match($fmText, '(?s)description:\s*[>|]?-?\s*["'']?(.*?)(?=\n[A-Za-z_-]+:|\z)')
         $desc = if ($descM.Success) { ($descM.Groups[1].Value -replace '\s+', ' ').Trim().Trim('"', "'") } else { '' }
+        $fullDesc = $desc
         if ($desc.Length -gt 160) { $desc = $desc.Substring(0, 160).TrimEnd() + '...' }
         $upstreamSkillIndex += [pscustomobject]@{
             rel     = "$containerRel/$($_.Name)"
+            plugin  = $pluginName
             name    = if ($nameM.Success) { $nameM.Groups[1].Value.Trim() } else { $_.Name }
             desc    = $desc
             nameHay = ("$($_.Name) " + $(if ($nameM.Success) { $nameM.Groups[1].Value } else { '' })).ToLowerInvariant()
-            descHay = $desc.ToLowerInvariant()
+            descHay = $fullDesc.ToLowerInvariant()
         }
     }
 }
@@ -1953,8 +2331,10 @@ function Get-AutoDiscoveredSkills {
     param([string]$AgentId, [string[]]$AlreadyPinned, [int]$Max = 6, [int]$MinScore = 2)
     if (-not $agentSkillKeywords.ContainsKey($AgentId) -or $upstreamSkillIndex.Count -eq 0) { return @() }
     $hits = @()
+    $scope = if ($agentSkillScope.ContainsKey($AgentId)) { @($agentSkillScope[$AgentId]) } else { @() }
     foreach ($skill in $upstreamSkillIndex) {
         if ($AlreadyPinned -contains $skill.rel) { continue }
+        if ($scope.Count -gt 0 -and ($scope -notcontains $skill.plugin)) { continue }
         if ($skill.rel -match '/(report-issue|telemetry)$' -and $AgentId -ne 'workspace-maintainer') { continue }
         $matched = @(); $score = 0
         foreach ($kw in $agentSkillKeywords[$AgentId]) {
@@ -2003,7 +2383,7 @@ function New-KnowledgeSection {
         else { 'read-only (analysis, plans, reports)' }
     [void]$sb.AppendLine("Write permission: $writePerm.")
     [void]$sb.AppendLine('')
-    [void]$sb.AppendLine('Read these before acting (custom skills win on style, upstream skills win on syntax/spec):')
+    [void]$sb.AppendLine('Start from these (custom skills win on style, upstream skills win on syntax/spec). Read the SKILL.md that owns the task first; open its references only for the step you are on and honour its own "read X only if Y" conditions - do not pre-load the whole list:')
     foreach ($s in @($Knowledge.skills)) { [void]$sb.AppendLine("- $(Resolve-KnowledgeRef $s.ref) - $($s.why)") }
     $pinned = @(@($Knowledge.skills) | ForEach-Object { [string]$_.ref })
     $auto = @(Get-AutoDiscoveredSkills -AgentId $Agent.id -AlreadyPinned $pinned)
@@ -2058,12 +2438,13 @@ does not implement).
 - **002 - Integration QA & Change Controller** - diff/pack review; returns a VERDICT;
   gates Production.
 - **003 - Workspace Maintainer** - keeps skills, MCP and config healthy.
-- **010-080 - Team Leads** - Canvas Apps, Power Automate, Power Pages, Code Apps,
-  Model Apps, Mobile Apps, MCP Apps, Solution ALM & Environments.
+- **010-090 - Team Leads** - Canvas Apps, Power Automate, Power Pages, Code Apps,
+  Model Apps, Mobile Apps, MCP Apps, Solution ALM & Environments, Copilot Studio.
 - **Hidden workers (`0NN-sub-*.agent.md`)** - Microsoft's own bundled plugin agents
-  (planners, screen builders, data-model architects, ...), auto-discovered from
-  `power-platform-skills/plugins/<plugin>/agents/` and wired into the owning Lead.
-  Pointer files, never forks; refreshed with the clone.
+  (planners, screen builders, data-model architects, the Copilot Studio architect /
+  describer / init / manage, ...), auto-discovered from
+  `power-platform-skills/plugins/<plugin>/agents/` and `copilot-studio-plugin/agents/`
+  and wired into the owning Lead. Pointer files, never forks; refreshed with the clones.
 
 Nested delegation (Master -> Lead -> worker) requires the VS Code setting
 `chat.subagents.allowInvocationsFromSubagents: true`. The installer writes it into
@@ -2098,7 +2479,12 @@ catalogue natively:
    `power-platform-skills/plugins/<plugin>/skills/<skill>/SKILL.md`, with shared
    `references/` per plugin. Plugins: canvas-apps, power-automate, power-pages,
    code-apps, model-apps, mobile-apps, power-apps-mobile-extension, mcp-apps.
-2. **Custom embedded skills** (committed, house style) in `.github/skills/<name>/SKILL.md`.
+2. **Microsoft Copilot Studio skills** (cloned, gitignored) in
+   `copilot-studio-plugin/skills/<skill>/SKILL.md` with `reference/` schemas:
+   create-agent, clone-agent, pull-agent, push-agent, publish-agent, delete-agent,
+   add-knowledge, add-skill (MCS2 YAML agents via `pac copilot`). Owned by
+   **090 - Copilot Studio Lead**.
+3. **Custom embedded skills** (committed, house style) in `.github/skills/<name>/SKILL.md`.
    Currently `pbi-powerapps-integration` - canvas apps embedded in a Power BI report
    (`PowerBIIntegration`, stale-schema issues) and repointing Power Apps / Flow visuals
    across DevOps branches. Custom skills win on style; upstream skills win on syntax/spec.
@@ -2148,9 +2534,9 @@ You never manually switch agents mid-task - the Master routes for you.
 $agentRows
 
 - **Executives** (000-003) coordinate, advise (PLAN), gate (VERDICT) and maintain.
-- **Team Leads** (010-080) each own one component area, validate their own
+- **Team Leads** (010-090) each own one component area, validate their own
   output, and dispatch Microsoft's bundled **workers** (hidden ``0NN-sub-*``
-  agents, auto-discovered from the skills clone) one artifact each. Delegation
+  agents, auto-discovered from the vendor clones) one artifact each. Delegation
   flows top-down: Master -> Architect (PLAN) or Master -> Team Lead (WORK ORDER)
   -> worker -> Lead validates -> Master consolidates (WORK RESULT). Only the agent
   you selected can ask you anything; everything else bubbles up as
@@ -2171,7 +2557,7 @@ one status-script call -> sign in / pick environment only if missing -> work
 
 **Working mode** (`.github/agent-docs/working-flow-reference.md`):
 team protocol (WORK ORDER / WORK RESULT), routing, approval tokens, full ALM
-lifecycle using the power-platform-skills plugins
+lifecycle using the power-platform-skills and copilot-studio-plugin skills
 
 ## Workspace structure
 
@@ -2181,8 +2567,9 @@ lifecycle using the power-platform-skills plugins
 exports/                -> raw .zip exports (gitignored)
 deploy/                 -> packed .zip files ready to import
 scripts/                -> pac-workflows.ps1 helper script (-ConfirmProd for PROD)
-power-platform-skills/  -> cloned Microsoft skills repo (gitignored)
-.github/agents/         -> agent definitions (000-080 + hidden 0NN-sub-* workers)
+power-platform-skills/  -> cloned Microsoft Power Platform skills repo (gitignored)
+copilot-studio-plugin/  -> cloned Microsoft Copilot Studio plugin repo (gitignored)
+.github/agents/         -> agent definitions (000-090 + hidden 0NN-sub-* workers)
 .github/agent-docs/     -> Get-SessionStatus.ps1, flows, tool-status.json
 .github/skills/         -> custom embedded skills (committed, house style)
 .vscode/mcp.json        -> canvas-authoring + flow-agent + microsoft-learn MCP servers
@@ -2199,7 +2586,8 @@ power-platform-skills/  -> cloned Microsoft skills repo (gitignored)
 "new solution [name]"            -> scaffold new solution
 "compare DEV and TEST"           -> diff two environments
 "status"                         -> auth + solutions + git summary
-"run maintenance"                -> refresh the skills clone + tool inventory
+"create a Copilot Studio agent"  -> 090 Copilot Studio Lead (pac copilot init / push; publish gated)
+"run maintenance"                -> refresh both vendor clones + tool inventory
 ``````
 "@
     Write-Host "  $(if ($updateMode) {'Updated'} else {'Created'}) AGENTS.md"
@@ -2245,7 +2633,7 @@ foreach ($agent in $orderedAgents) {
     $handoffsYaml = ''
     if ($agent.id -eq 'power-platform-master' -and $displayLabelById.ContainsKey('workspace-maintainer')) {
         $maintLabel = $displayLabelById['workspace-maintainer'] -replace "'", "''"
-        $handoffsYaml = "`nhandoffs:`n  - label: 'Run workspace maintenance'`n    agent: '$maintLabel'`n    prompt: 'Run light maintenance: refresh the Microsoft skills clone to upstream, re-register skill folders, refresh the tool inventory, then report what changed.'`n    send: false"
+        $handoffsYaml = "`nhandoffs:`n  - label: 'Run workspace maintenance'`n    agent: '$maintLabel'`n    prompt: 'Run light maintenance: refresh both Microsoft vendor clones (power-platform-skills, copilot-studio-plugin) to upstream, re-register skill folders, refresh the tool inventory, then report what changed.'`n    send: false"
     }
     $frontMatter = "---`nname: '$safeLabel'`ndescription: '$descEsc'`nuser-invocable: $uinv`ntools: $toolsYaml`nagents: $childrenYaml$handoffsYaml`n---`n`n"
     $body = Get-AgentBody $agent $label $childLabels
@@ -2281,7 +2669,8 @@ $sessionStatusPath = "$rootPath\.github\agent-docs\Get-SessionStatus.ps1"
 if ($updateMode -or -not (Test-Path $sessionStatusPath)) {
     $sessionStatusScript = @'
 # Get-SessionStatus.ps1 -- one-shot session health for the Power Platform Master.
-# Run from anywhere:  powershell -NoProfile -ExecutionPolicy Bypass -File .github/agent-docs/Get-SessionStatus.ps1
+# Run with its ABSOLUTE path (the terminal CWD is not guaranteed to be the workspace root):
+#   powershell -NoProfile -ExecutionPolicy Bypass -File "<workspace>\.github\agent-docs\Get-SessionStatus.ps1"
 # Prints a compact status block and refreshes .github/agent-docs/tool-status.json in place.
 $ErrorActionPreference = 'SilentlyContinue'
 # Workspace root = two levels above this script (.github/agent-docs/), so the CWD does not matter.
@@ -2308,18 +2697,33 @@ function Get-AgeDays([string]$stamp) {
     return [int]((Get-Date) - [datetime]::ParseExact($m.Value, 'yyyy-MM-dd', $null)).TotalDays
 }
 
-# -- Skills freshness --
-$ms  = Get-RepoDate 'power-platform-skills'
+# -- Skills freshness (every Microsoft vendor clone) --
 $pbi = Get-FileDate '.github/skills/pbi-powerapps-integration/SKILL.md'
-$behind = ''
-$skillsRepo = Join-Path $root 'power-platform-skills'
-if (Test-Path -LiteralPath $skillsRepo) {
-    $cnt = & git -C $skillsRepo rev-list --count 'HEAD..origin/HEAD' 2>$null
-    if ($cnt -and [int]$cnt -gt 0) { $behind = " (local clone is $cnt commit(s) behind the last fetch)" }
+$vendorNames = @(%%VENDORS%%)
+$skillSearch = @(%%VENDORSKILLDIRS%%)
+$manifestPath = Join-Path $root '.github/installed-manifest.json'
+$mf = $null
+if (Test-Path -LiteralPath $manifestPath) { try { $mf = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json } catch { } }
+$stale = $false; $moved = @(); $parts = @()
+foreach ($vn in $vendorNames) {
+    $vd = Get-RepoDate $vn
+    $vrepo = Join-Path $root $vn
+    $behind = ''
+    if (Test-Path -LiteralPath $vrepo) {
+        $cnt = & git -C $vrepo rev-list --count 'HEAD..origin/HEAD' 2>$null
+        if ($cnt -and [int]$cnt -gt 0) { $behind = " ($cnt behind last fetch)" }
+        # Agents (worker roster, skill lists) were generated from a specific clone commit; flag drift.
+        $headNow = (& git -C $vrepo rev-parse HEAD 2>$null)
+        $gen = $null
+        if ($mf -and $mf.vendorCommits -and $mf.vendorCommits.PSObject.Properties[$vn]) { $gen = [string]$mf.vendorCommits.$vn }
+        if ($headNow -and $gen -and ($gen -ne $headNow)) { $moved += "$vn ($($gen.Substring(0,7)) -> $($headNow.Substring(0,7)))" }
+    }
+    if ((Get-AgeDays $vd) -gt 30 -or $behind) { $stale = $true }
+    $parts += "$vn $vd$behind"
 }
-$out.Add("SKILLS   Microsoft power-platform-skills: $ms$behind | custom pbi-powerapps-integration: $pbi")
-$age = Get-AgeDays $ms
-if ($age -gt 30 -or $behind) { $out.Add("         Upstream skills are stale -> say 'run maintenance' (Workspace Maintainer refreshes the clone).") }
+$out.Add("SKILLS   Microsoft: $($parts -join ' | ') | custom pbi-powerapps-integration: $pbi")
+if ($stale) { $out.Add("         Upstream skills are stale -> say 'run maintenance' (Workspace Maintainer refreshes the clones).") }
+if ($moved.Count -gt 0) { $out.Add("         Clone moved since the agents were generated: $($moved -join '; ') -> re-run the installer so the worker roster and skill lists match.") }
 
 # -- Registered skill locations (self-heal: register new plugin skill containers) + nested dispatch --
 $settingsPath = Join-Path $root '.vscode/settings.json'
@@ -2331,8 +2735,9 @@ if (Test-Path -LiteralPath $settingsPath) {
         $s = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json
         $loc = $s.'chat.agentSkillsLocations'
         if (-not $loc) { $loc = New-Object PSObject; $s | Add-Member -NotePropertyName 'chat.agentSkillsLocations' -NotePropertyValue $loc -Force }
-        $base = Join-Path $root 'power-platform-skills\plugins'
-        if (Test-Path -LiteralPath $base) {
+        foreach ($sub in $skillSearch) {
+            $base = Join-Path $root $sub
+            if (-not (Test-Path -LiteralPath $base)) { continue }
             Get-ChildItem -LiteralPath $base -Recurse -Filter 'SKILL.md' -File | ForEach-Object {
                 $c = $_.Directory.Parent; if ($null -eq $c) { return }
                 $rel = $c.FullName.Substring($root.TrimEnd('\').Length).TrimStart('\').Replace('\', '/')
@@ -2393,6 +2798,7 @@ if (Test-Path -LiteralPath $toolStatusPath) {
 $out | ForEach-Object { Write-Output $_ }
 if ($out.Count -le 1) { Write-Output 'STATUS   script ran but collected nothing - check that .vscode/settings.json and .github/agent-docs exist under ROOT' }
 '@
+    $sessionStatusScript = $sessionStatusScript.Replace('%%VENDORS%%', (($vendorClones | ForEach-Object { "'$($_.Name)'" }) -join ', ')).Replace('%%VENDORSKILLDIRS%%', (($vendorSkillSearchPaths | ForEach-Object { "'$_'" }) -join ', '))
     Write-ManagedFile $sessionStatusPath $sessionStatusScript
     Write-Host "  $(if ($updateMode) {'Updated'} else {'Created'}) .github/agent-docs/Get-SessionStatus.ps1"
 } else {
@@ -2402,7 +2808,7 @@ if ($out.Count -le 1) { Write-Output 'STATUS   script ran but collected nothing 
 # -- .github/agent-docs/starting-flow.md --------------------------------
 $startingFlowPath = "$rootPath\.github\agent-docs\starting-flow.md"
 if ($updateMode -or -not (Test-Path $startingFlowPath)) {
-    $startingFlowContent = @'
+    $startingFlowContent = (@'
 # Starting Flow - Power Platform Master Agent
 
 Run once, on the first message of every session. Keep it fast: one script call,
@@ -2421,9 +2827,13 @@ Keep the original message: you act on it right after Phase 2.
 
 ## Phase 1 - One-shot session status (single terminal call)
 
-Run exactly this, from any CWD, in ONE terminal call:
+Run exactly this in ONE terminal call. Use the ABSOLUTE path (the terminal's CWD
+is not guaranteed to be the workspace root, especially in a multi-root window):
 
-  powershell -NoProfile -ExecutionPolicy Bypass -File .github/agent-docs/Get-SessionStatus.ps1
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%%ROOT%%\.github\agent-docs\Get-SessionStatus.ps1"
+
+If that path does not exist (the folder was moved), resolve it from the open
+workspace folder that contains `.github/agents/` and use that instead.
 
 It prints SKILLS / CONFIG / IDENTITY / ENV / TOOLS lines and refreshes
 `.github/agent-docs/tool-status.json` live. Relay it as one compact block:
@@ -2440,15 +2850,24 @@ Rules:
   them refreshed." Then move on.
 - If nested dispatch is NOT set, warn in one line that Team Leads cannot reach
   their Microsoft workers until the installer is re-run, then continue.
+- If the script reports a vendor clone is at a different commit than the one
+  the agents were generated from, add ONE line: "A Microsoft vendor clone moved
+  since the agents were generated - re-run the installer when convenient so the
+  worker roster and skill lists match." Then move on.
 - If the script itself fails, fall back to `pac auth list` alone and say the
   status script was unavailable. Never block.
 
 ---
 
-## Phase 2 - Sign-in and environment: only if missing
+## Phase 2 - Sign-in and environment: only if missing AND the task needs it
 
-Everything in this workspace needs an active `pac` profile pointed at an
-environment. Skip this phase entirely when IDENTITY and ENV are both populated.
+An active `pac` profile pointed at an environment is needed for anything that
+touches an environment (pull, push, sync, live canvas / flow authoring, status
+of solutions). It is NOT needed to read or edit already-unpacked source, review
+diffs, plan, or answer questions. Skip this phase entirely when IDENTITY and ENV
+are both populated, or when the opening TASK is local-only (say so in one line:
+"Not signed in to pac - fine for this local task; I'll ask when something needs
+an environment").
 
 - **Not signed in** -> "Let's get you signed in. What email should I use?" Then
   `pac auth create --deviceCode`, show the URL + code, wait, confirm.
@@ -2484,7 +2903,7 @@ chat session.
 The user never has to change agent in the dropdown for normal work. The only
 optional switch is workspace maintenance (refreshing the skills clone and MCP
 registrations), offered through the handoff button when the user asks for it.
-'@
+'@).Replace('%%ROOT%%', $rootPath.TrimEnd('\'))
     Write-ManagedFile $startingFlowPath $startingFlowContent
     Write-Host "  $(if ($updateMode) {'Updated'} else {'Created'}) .github/agent-docs/starting-flow.md"
 } else {
@@ -2519,30 +2938,55 @@ sees the full skill list (name + description) without listing directories:
   guides in `power-platform-skills/plugins/<plugin>/references/`. Plugins:
   canvas-apps, power-automate, power-pages, code-apps, model-apps, mobile-apps,
   power-apps-mobile-extension, mcp-apps.
+- **Microsoft copilot-studio-plugin (MIT, read-only vendor clone):**
+  `copilot-studio-plugin/skills/<skill>/SKILL.md` (create-agent, clone-agent,
+  pull-agent, push-agent, publish-agent, delete-agent, add-knowledge, add-skill)
+  with the authoritative YAML schemas in `copilot-studio-plugin/reference/`. These
+  drive `pac copilot` for MCS2 (agentic-loop) Copilot Studio agents and belong to
+  **090 - Copilot Studio Lead**; its hidden workers are Microsoft's Copilot Studio
+  Architect / Describer / Init / Manage agents.
 
 Rules: read the relevant SKILL.md (and the references it points to) BEFORE
 generating any YAML, Power Fx, flow definition, TypeScript or solution XML. Read
 both the custom and the upstream skill for a topic: custom wins on style,
 upstream wins on syntax/spec. If a skill you expect is not in your list,
-re-discover it by keyword under `power-platform-skills/plugins/*/skills/`
-(folders are renamed upstream from time to time) - never fail because of a path.
+re-discover it by keyword under `power-platform-skills/plugins/*/skills/` or
+`copilot-studio-plugin/skills/` (folders are renamed upstream from time to time) -
+never fail because of a path.
 
 Microsoft's plugins were written for another agent runtime. Translate, do not
-copy: their `Task` tool is your `agent` tool; `${PLUGIN_ROOT}` is
-`power-platform-skills/plugins/<plugin>`; `AskUserQuestion` does not exist for a
+copy: their `Task` tool is your `agent` tool; `${PLUGIN_ROOT}` is the plugin
+folder (`power-platform-skills/plugins/<plugin>` or `copilot-studio-plugin`); a
+`<plugin>:<skill>` reference such as `mcs-assistant:publish-agent` means that
+plugin's `skills/<skill>/SKILL.md`; `AskUserQuestion` does not exist for a
 dispatched agent - return `NEEDS INPUT` / `NEEDS APPROVAL` instead. Skip the
 plugin `AGENTS.md` / `CLAUDE.md` files (runtime notes for that other tool); the
-`SKILL.md` and `references/` are what you follow.
+`SKILL.md` and references are what you follow.
 
 Two authoring models coexist; the SKILL.md tells you which one applies:
 
 - **Solution-bound (pac CLI, offline):** export -> unpack -> edit source -> pack
-  -> import. Works for every component type and is the source-controlled path.
+  -> import. The source-controlled path for anything that lives in a solution.
 - **Live (plugin runtime):** canvas apps through the `canvas-authoring` MCP
   (`sync_canvas` into a working folder, edit `.pa.yaml`, `compile_canvas` commits
   to the open Studio session); cloud flows through the `flow-agent` MCP; code
   apps / mobile apps / Power Pages through their own CLIs as their skills say.
   Live changes are not in git until the solution is pulled again - say so.
+
+Which model fits which component (the Lead decides; this is the default):
+
+| Component | Offline (pac solution) | Live / own CLI |
+|---|---|---|
+| Canvas app | yes - `.pa.yaml` in the unpacked solution | yes - `canvas-authoring` MCP (open Studio tab) |
+| Cloud flow | yes - `definition.json` in the unpacked solution | yes - `flow-agent` MCP (needs Node + `az login`) |
+| Desktop flow | metadata only | authored in Power Automate Desktop - edit there |
+| Model-driven forms / views / sitemap | yes - XML in the unpacked solution | no |
+| Generative pages (model-apps) | packaged by the genpage CLI flow | yes - genpage skill (its CLI) |
+| Code app | source lives in its own repo, not the solution | yes - `npx --no-install pa` (Node 22+) |
+| Mobile app (Expo) | source lives in its own repo | yes - Expo / mobile-apps CLI flow (Node 22+) |
+| Power Pages site | yes - `pac pages download/upload` + solution for tables | yes - code-site tooling |
+| Copilot Studio agent (MCS2) | classic agents only (topic YAML inside the solution) | yes - `pac copilot` workspace: init/clone -> edit YAML -> pull/push; publish gated |
+| Dataverse tables / columns | yes - solution XML (destructive-adjacent, token) | via the owning skill's CLI |
 
 ---
 
@@ -2580,7 +3024,8 @@ Routing map (topic -> Team Lead; workers are Microsoft's, auto-discovered per Le
 - Mobile apps (Expo / React Native), offline profiles, `.ppmplugin` -> **060 - Mobile Apps Lead**
 - MCP-based apps -> **070 - MCP Apps Lead**
 - Solutions, publishers, environments, export/import, promotion -> **080 - Solution ALM & Environments Lead**
-- Skills clone, MCP registration, config drift, installer health -> **003 - Workspace Maintainer**
+- Copilot Studio agents (MCS2 YAML projects, `pac copilot`, knowledge, agent skills, publish) -> **090 - Copilot Studio Lead**
+- Skills clones, MCP registration, config drift, installer health -> **003 - Workspace Maintainer**
 
 Route by TOPIC, not by tool availability: if an MCP server or CLI is missing the
 request still belongs to the same team, which reads `tool-status.json` and
@@ -2665,23 +3110,29 @@ token covers and returns `NEEDS APPROVAL` for anything else.
 
 ### EDIT a component
 
-Two editing modes, both first-class. Pick by component type and what the user wants.
+Two editing modes, both first-class. Pick by component type (matrix above) and what
+the user wants.
 
-**Offline authoring - works for EVERY component** (canvas apps, Power Automate
-flows, model-driven forms/views/sitemap, code apps, pages, ...):
+**Offline authoring - for everything that lives in a solution** (canvas apps,
+cloud flows, model-driven forms/views/sitemap, Dataverse schema, Pages tables):
 1. Pull the solution (export -> unpack) so the source is local.
-2. Read the owning plugin's SKILL.md (registered in your skills list) and its
-   references; follow it step by step.
+2. Read the owning plugin's SKILL.md (registered in your skills list) and the
+   references it names for the step you are on - honour its own "read X only if Y"
+   conditions instead of pre-loading everything.
 3. Edit the unpacked source, then run git diff and summarise what changed.
 4. Pack and import to apply (needs the environment's approval token). Changes
    show up in the platform after import + a refresh.
 
-**Live coauthoring - canvas apps ONLY** (real-time; no pack/import): drives an
+**Live coauthoring - canvas apps** (real-time; no pack/import): drives an
 OPEN Power Apps Studio browser tab through the `canvas-authoring` MCP tools - see
-"Live canvas coauthoring" below.
+"Live canvas coauthoring" below. Cloud flows have the equivalent through the
+`flow-agent` MCP; code apps, mobile apps and Pages code sites use their own CLI
+flow (their SKILL.md is the authority).
 
-Rule of thumb: non-canvas components -> offline only. Canvas apps -> offer either
-(quick tweaks shine live; larger or source-controlled changes shine offline).
+Rule of thumb: solution XML components (forms, views, sitemap, schema) -> offline
+only. Canvas apps and cloud flows -> offer either (quick tweaks shine live; larger
+or source-controlled changes shine offline). Code / mobile / Pages code sites ->
+their CLI flow, then pull the solution so git has the result.
 Canvas authoring is browser-based - there is NO desktop app; never say otherwise.
 
 #### Live canvas coauthoring (step by step)
@@ -2816,9 +3267,14 @@ Steps (guide the user - it is not all automatic):
 - Use the exact executable `path` recorded in `.github/agent-docs/tool-status.json`
   so an older same-named copy on PATH cannot take precedence.
 - Sub-agent dispatch and live MCP calls can hit transient HTTP/2 stream errors
-  (`ERR_HTTP2_SERVER_REFUSED_STREAM`, an empty completion). Retry 2-3 times with a
-  short pause before treating it as a failure - an empty completion is a transport
-  blip, not proof the work did not happen.
+  (`ERR_HTTP2_SERVER_REFUSED_STREAM`, an empty completion). Retry 2-3 times with
+  a short pause ONLY for read-only calls and for dispatches whose WORK ORDER has
+  no write in it - an empty completion is a transport blip, not proof the work
+  did not happen. A dispatch or call that could have WRITTEN (edits, import,
+  `compile_canvas` commit, flow publish) is not retry-safe: reconcile first
+  (`git status` / `git diff` on the artifact, `pac solution list`, a fresh
+  `sync_canvas`, the flow run history) and repeat only what is verifiably absent,
+  telling the child what already exists.
 - Read fast-changing output files with a terminal `Get-Content`, not the cached
   file reader; prefer unique, single-use output file names.
 
@@ -3255,18 +3711,18 @@ if ($updateMode -or -not (Test-Path $tasksJsonPath)) {
 # registered natively so agents see the catalogue without listing folders.
 $settingsJsonPath = "$rootPath\.vscode\settings.json"
 $skillLocations = [ordered]@{ '.github/skills' = $true }
-foreach ($loc in @(Get-SkillContainerDirs -RootPath $rootPath -SearchSubPaths @('power-platform-skills\plugins'))) { $skillLocations[$loc] = $true }
+foreach ($loc in @(Get-SkillContainerDirs -RootPath $rootPath -SearchSubPaths $vendorSkillSearchPaths)) { $skillLocations[$loc] = $true }
+$searchExclude = @{}
+foreach ($v in $vendorClones) { $searchExclude["$($v.Name)/"] = $true }
 $requiredSettings = @{
     "task.allowAutomaticTasks" = "on"
     "chat.subagents.allowInvocationsFromSubagents" = $true
     "chat.agentSkillsLocations" = $skillLocations
     "git.ignoreLimitWarning" = $true
-    "search.exclude" = @{
-        "power-platform-skills/" = $true
-    }
+    "search.exclude" = $searchExclude
 }
 $existed = Test-Path $settingsJsonPath
-Merge-JsonSettings $settingsJsonPath $requiredSettings
+$null = Merge-JsonSettings $settingsJsonPath $requiredSettings
 Write-Host "  $(if ($existed) {'Merged'} else {'Created'}) .vscode/settings.json (nested dispatch on, $($skillLocations.Count) skill location(s))"
 
 # -- .vscode/mcp.json (Canvas Authoring + FlowAgent + Microsoft Learn MCP) --
@@ -3307,7 +3763,7 @@ $requiredMcp = @{
     }
 }
 $mcpExisted = Test-Path $mcpJsonPath
-Merge-JsonSettings $mcpJsonPath $requiredMcp
+$null = Merge-JsonSettings $mcpJsonPath $requiredMcp
 Write-Host "  $(if ($mcpExisted) {'Merged'} else {'Created'}) .vscode/mcp.json (canvas-authoring + flow-agent + microsoft-learn MCP servers)"
 
 # -- <folder>.code-workspace (window-scoped nested dispatch) ------------
@@ -3320,29 +3776,50 @@ $workspaceFileName = (Split-Path $rootPath -Leaf) + '.code-workspace'
 $workspaceFilePath = Join-Path $rootPath $workspaceFileName
 $wsObj = [ordered]@{}
 $wsFolders = @()
-if (Test-Path -LiteralPath $workspaceFilePath) {
+# Folder renamed since the last run? The previous manifest names the workspace file we
+# shipped under the old name; use it as the base so user folders/settings carry over
+# (Step 6 prunes the old file afterwards).
+$wsSourcePath = $workspaceFilePath
+if (-not (Test-Path -LiteralPath $workspaceFilePath) -and $updateMode -and (Test-Path -LiteralPath "$rootPath\.github\installed-manifest.json")) {
     try {
-        $parsedWs = Get-Content -LiteralPath $workspaceFilePath -Raw | ConvertFrom-Json
+        $prevForWs = Get-Content -LiteralPath "$rootPath\.github\installed-manifest.json" -Raw | ConvertFrom-Json
+        $oldWs = @($prevForWs.merged | Where-Object { $_ -and ($_.path -notmatch '[\\/]') -and ($_.path -like '*.code-workspace') } | Select-Object -First 1)
+        if ($oldWs.Count -gt 0 -and (Test-Path -LiteralPath (Join-Path $rootPath $oldWs[0].path))) {
+            $wsSourcePath = Join-Path $rootPath $oldWs[0].path
+            Write-Host "  Folder was renamed: carrying settings over from $($oldWs[0].path)" -ForegroundColor DarkGray
+        }
+    } catch { }
+}
+if (Test-Path -LiteralPath $wsSourcePath) {
+    $parsedWs = Read-JsonLenient -LiteralPath $wsSourcePath
+    if ($null -ne $parsedWs) {
         foreach ($p in $parsedWs.PSObject.Properties) { $wsObj[$p.Name] = $p.Value }
         $wsFolders = @($parsedWs.folders)
-    } catch {
-        Copy-Item -LiteralPath $workspaceFilePath -Destination "$workspaceFilePath.bak" -Force
-        Write-Host "  Backed up malformed $workspaceFileName to $workspaceFileName.bak" -ForegroundColor Yellow
+    } elseif ($wsSourcePath -eq $workspaceFilePath) {
+        $script:unmergedConfigs += $workspaceFilePath
+        Write-Host "  $workspaceFileName could not be parsed as JSON - left untouched. Nested dispatch is NOT guaranteed in multi-root windows until it is fixed." -ForegroundColor Yellow
     }
 }
-if (-not @($wsFolders | Where-Object { $_ -and ([string]$_.path).Replace('\', '/').TrimEnd('/') -eq '.' }).Count) {
-    $wsFolders = @([pscustomobject][ordered]@{ path = '.' }) + @($wsFolders | Where-Object { $_ })
+if ($script:unmergedConfigs -notcontains $workspaceFilePath) {
+    if (-not @($wsFolders | Where-Object { $_ -and ([string]$_.path).Replace('\', '/').TrimEnd('/') -eq '.' }).Count) {
+        $wsFolders = @([pscustomobject][ordered]@{ path = '.' }) + @($wsFolders | Where-Object { $_ })
+    }
+    $wsObj['folders'] = @($wsFolders)
+    $wsSettings = [ordered]@{}
+    if ($wsObj.Contains('settings') -and $wsObj['settings']) { foreach ($p in $wsObj['settings'].PSObject.Properties) { $wsSettings[$p.Name] = $p.Value } }
+    $wsSettings['chat.subagents.allowInvocationsFromSubagents'] = $true
+    $wsObj['settings'] = $wsSettings
+    $wsExisted = Test-Path -LiteralPath $workspaceFilePath
+    Write-ManagedFile $workspaceFilePath (($wsObj | ConvertTo-Json -Depth 10))
+    Write-Host "  $(if ($wsExisted) {'Merged'} else {'Created'}) $workspaceFileName (nested dispatch forced on at window scope)"
 }
-$wsObj['folders'] = @($wsFolders)
-$wsSettings = [ordered]@{}
-if ($wsObj.Contains('settings') -and $wsObj['settings']) { foreach ($p in $wsObj['settings'].PSObject.Properties) { $wsSettings[$p.Name] = $p.Value } }
-$wsSettings['chat.subagents.allowInvocationsFromSubagents'] = $true
-$wsObj['settings'] = $wsSettings
-$wsExisted = Test-Path -LiteralPath $workspaceFilePath
-Write-ManagedFile $workspaceFilePath (($wsObj | ConvertTo-Json -Depth 10))
-Write-Host "  $(if ($wsExisted) {'Merged'} else {'Created'}) $workspaceFileName (nested dispatch forced on at window scope)"
 
 Write-Host "`nAll configuration files ready." -ForegroundColor Green
+if ($script:unmergedConfigs.Count -gt 0) {
+    $warnings += "These config files could not be parsed and were left untouched (required keys NOT added):" + [Environment]::NewLine +
+                 "             " + (($script:unmergedConfigs | ForEach-Object { $_.Substring($rootPath.Length).TrimStart('\') }) -join ', ') + [Environment]::NewLine +
+                 "             Fix the JSON and re-run the installer."
+}
 if (-not $EmitAgentsTo) { Read-Host "`nPress Enter to continue..." }
 
 # =====================================================================
@@ -3374,26 +3851,31 @@ $toolStatus = [ordered]@{
         "canvas-authoring" = @{ requires = "dnx (.NET 10 SDK)"; purpose = "live canvas coauthoring" }
         "flow-agent"       = @{ requires = "Node.js 18+ and az login"; purpose = "Power Automate flow authoring" }
     }
+    runtimeNotes = [ordered]@{
+        node = "The installer guarantees Node.js 18+ (enough for the flow MCP). Code apps and mobile apps (Expo SDK 55) need Node.js 22+ and npm 10+ - check 'node --version' before those tasks."
+    }
 }
 Write-ManagedFile $toolStatusPath (($toolStatus | ConvertTo-Json -Depth 6))
 Write-Host "  $(if ($updateMode) {'Updated'} else {'Created'}) .github/agent-docs/tool-status.json"
 
-# -- installed-manifest.json (SHA256 integrity of managed files) -------
+# -- installed-manifest.json (integrity of managed files) --------------
 # The manifest is an authoritative WRITE-LOG: it lists exactly the files this
 # installer just wrote (never a directory scan), so orphans can never be
-# re-absorbed. Machine-specific artefacts (tool-status.json, guardrail-status.json,
-# the manifest itself) are deliberately EXCLUDED - they are regenerated every run,
-# carry environment identifiers, and are .gitignored, so hashing them would make
-# -VerifyRoot report false drift.
+# re-absorbed. Three sections:
+#   files      - authored files, SHA256-hashed (agents, docs, scripts, skill).
+#   discovered - worker wrappers generated from the skills clone, SHA256-hashed
+#                (their lifecycle is discovery's, but they are installer-owned).
+#   merged     - settings.json / mcp.json / <folder>.code-workspace. These are
+#                MERGE files that legitimately carry user keys, so they are
+#                key-checked (required keys present), never hashed.
+# Machine-specific artefacts (tool-status.json, guardrail-status.json, the
+# manifest itself) are excluded: regenerated every run and .gitignored.
 $manifestOut = "$rootPath\.github\installed-manifest.json"
 $managedRelFiles = @()
 foreach ($a in $orderedAgents) { $managedRelFiles += ".github\agents\$($a.filename)" }
 $managedRelFiles += @(
     '.github\copilot-instructions.md',
     'AGENTS.md',
-    $workspaceFileName,
-    '.vscode\mcp.json',
-    '.vscode\settings.json',
     '.vscode\tasks.json',
     '.gitignore',
     'scripts\pac-workflows.ps1',
@@ -3409,7 +3891,19 @@ foreach ($rel in $managedRelFiles) {
         $manifestFiles += [ordered]@{ path = $rel; sha256 = Get-Sha256Hex -LiteralPath $full }
     }
 }
-$newManifestPaths = @($manifestFiles | ForEach-Object { $_.path })
+$manifestDiscovered = @()
+foreach ($rel in @($disc.Wrappers)) {
+    $full = Join-Path $rootPath $rel
+    if (Test-Path -LiteralPath $full -PathType Leaf) {
+        $manifestDiscovered += [ordered]@{ path = $rel; sha256 = Get-Sha256Hex -LiteralPath $full }
+    }
+}
+$manifestMerged = @(
+    [ordered]@{ path = '.vscode\settings.json'; requiredKeys = @('chat.subagents.allowInvocationsFromSubagents', 'chat.agentSkillsLocations::.github/skills'); requiredTrue = @('chat.subagents.allowInvocationsFromSubagents', 'chat.agentSkillsLocations::.github/skills') },
+    [ordered]@{ path = '.vscode\mcp.json';      requiredKeys = @('servers::canvas-authoring::command', 'servers::flow-agent::command', 'servers::microsoft-learn::url'); requiredTrue = @() },
+    [ordered]@{ path = $workspaceFileName;       requiredKeys = @('folders', 'settings::chat.subagents.allowInvocationsFromSubagents'); requiredTrue = @('settings::chat.subagents.allowInvocationsFromSubagents') }
+)
+$newManifestPaths = @($manifestFiles | ForEach-Object { $_.path }) + @($manifestDiscovered | ForEach-Object { $_.path }) + @($manifestMerged | ForEach-Object { $_.path })
 
 # -- Self-pruning: remove files WE shipped in a past version but no longer do --
 # Compare the PREVIOUS manifest (still on disk) against the set we are about to
@@ -3417,6 +3911,7 @@ $newManifestPaths = @($manifestFiles | ForEach-Object { $_.path })
 # shipped - is a candidate. User-created files were never in our manifest, so they
 # are structurally excluded. Belt-and-braces: candidates must also sit inside a
 # managed root (allow-list) and never be a machine-local artefact.
+$prunedPaths = @()
 if ($updateMode -and (Test-Path -LiteralPath $manifestOut -PathType Leaf)) {
     $purgeAllowedPrefixes = @('.github\agents\', '.github\skills\', '.github\agent-docs\', '.vscode\', 'scripts\')
     $purgeAllowedExact    = @('.github\copilot-instructions.md', 'AGENTS.md', '.gitignore')
@@ -3425,16 +3920,19 @@ if ($updateMode -and (Test-Path -LiteralPath $manifestOut -PathType Leaf)) {
         $prevManifest = Get-Content -LiteralPath $manifestOut -Raw | ConvertFrom-Json
     } catch { $prevManifest = $null }
     if ($prevManifest -and $prevManifest.schemaVersion -eq 1 -and $prevManifest.files) {
-        $previousManifestPaths = @($prevManifest.files | ForEach-Object { ($_.path -replace '/', '\') })
+        $previousManifestPaths = @(@($prevManifest.files) + @($prevManifest.discovered) + @($prevManifest.merged) | Where-Object { $_ } | ForEach-Object { ($_.path -replace '/', '\') })
         foreach ($old in $previousManifestPaths) {
             if ($newManifestPaths -contains $old) { continue }
             if ($purgeExcluded -contains $old)     { continue }
-            $inScope = ($purgeAllowedExact -contains $old) -or ($purgeAllowedPrefixes | Where-Object { $old.StartsWith($_) })
+            # A root-level *.code-workspace we shipped under a previous folder name is also in scope.
+            $isOurWorkspaceFile = ($old -notmatch '[\\/]') -and ($old -like '*.code-workspace')
+            $inScope = ($purgeAllowedExact -contains $old) -or $isOurWorkspaceFile -or ($purgeAllowedPrefixes | Where-Object { $old.StartsWith($_) })
             if (-not $inScope) { continue }
             $victim = Join-Path $rootPath $old
             if (Test-Path -LiteralPath $victim -PathType Leaf) {
                 try {
                     Remove-Item -LiteralPath $victim -Force
+                    $prunedPaths += $old
                     Write-Host "  Pruned orphan (no longer shipped): $old" -ForegroundColor DarkGray
                 } catch {
                     Write-Host "  Could not prune $old (in use?) - leaving in place." -ForegroundColor Yellow
@@ -3448,45 +3946,72 @@ if ($updateMode -and (Test-Path -LiteralPath $manifestOut -PathType Leaf)) {
 
 # -- Legacy orphans from pre-manifest installer versions ---------------
 # These were produced by older versions BEFORE the write-log manifest existed, so
-# the diff above can never see them. Remove them explicitly. They can leak
-# environment identifiers (GUIDs/emails), so purging them is a priority.
+# the diff above can never see them. Remove them only when their content is
+# recognisably ours (a user may have reused the same name for something else).
 # `.github\hooks` is deliberately NOT listed: it is VS Code's official hooks
 # folder today, so a user may legitimately own files there.
-$legacyOrphans = @('.github\copilot', '.session-active')
-foreach ($lo in $legacyOrphans) {
-    $lop = Join-Path $rootPath $lo
-    if (Test-Path -LiteralPath $lop) {
-        try {
-            Remove-Item -LiteralPath $lop -Recurse -Force
-            Write-Host "  Removed legacy orphan: $lo" -ForegroundColor DarkGray
-        } catch { }
+$sessionMarker = Join-Path $rootPath '.session-active'
+if (Test-Path -LiteralPath $sessionMarker -PathType Leaf) {
+    $len = (Get-Item -LiteralPath $sessionMarker).Length
+    if ($len -le 2048) { try { Remove-Item -LiteralPath $sessionMarker -Force; Write-Host "  Removed legacy orphan: .session-active" -ForegroundColor DarkGray } catch { } }
+    else { Write-Host "  .session-active is larger than the installer's old marker - left in place." -ForegroundColor DarkGray }
+}
+$legacyCopilotDir = Join-Path $rootPath '.github\copilot'
+if (Test-Path -LiteralPath $legacyCopilotDir -PathType Container) {
+    $lfiles = @(Get-ChildItem -LiteralPath $legacyCopilotDir -Recurse -File -ErrorAction SilentlyContinue)
+    $allKnownTypes = @($lfiles | Where-Object { $_.Extension -notin @('.md', '.json', '.txt') }).Count -eq 0
+    $looksOurs = $false
+    foreach ($lf in $lfiles) { if ((Get-Content -LiteralPath $lf.FullName -Raw -ErrorAction SilentlyContinue) -match 'Power Platform (Master|Agent|Workspace)|pac-workflows') { $looksOurs = $true; break } }
+    if ($lfiles.Count -eq 0 -or ($allKnownTypes -and $looksOurs)) {
+        try { Remove-Item -LiteralPath $legacyCopilotDir -Recurse -Force; Write-Host "  Removed legacy orphan: .github\copilot" -ForegroundColor DarkGray } catch { }
+    } else {
+        Write-Host "  .github\copilot exists but its content is not recognised as installer output - left in place (review it yourself)." -ForegroundColor Yellow
     }
 }
 
+# The vendor clone commits the agents were generated from: the status script compares them
+# with each clone's HEAD and tells the user to re-run the installer when they diverge.
+$vendorCommits = [ordered]@{}
+foreach ($v in $vendorClones) {
+    $cloneDir = Join-Path $rootPath $v.Name
+    $sc = $null
+    if (Test-Path -LiteralPath (Join-Path $cloneDir '.git')) {
+        $prevEAP2 = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        $raw = (& git -C $cloneDir rev-parse HEAD 2>$null)
+        $rc = $LASTEXITCODE
+        $ErrorActionPreference = $prevEAP2
+        if ($rc -eq 0 -and $raw -match '^[0-9a-f]{40}$') { $sc = $raw }
+    }
+    $vendorCommits[$v.Name] = $sc
+}
 $installedManifest = [ordered]@{
     schemaVersion  = 1
     generatedAt    = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
     generatedBy    = 'installer'
     productVersion = $productVersion
+    vendorCommits  = $vendorCommits
     fileCount      = $manifestFiles.Count
     files          = $manifestFiles
+    discovered     = $manifestDiscovered
+    merged         = $manifestMerged
 }
 Write-ManagedFile $manifestOut (($installedManifest | ConvertTo-Json -Depth 6))
-Write-Host "  $(if ($updateMode) {'Updated'} else {'Created'}) .github/installed-manifest.json ($($manifestFiles.Count) managed files)"
+Write-Host "  $(if ($updateMode) {'Updated'} else {'Created'}) .github/installed-manifest.json ($($manifestFiles.Count) authored + $($manifestDiscovered.Count) discovered hashed, $($manifestMerged.Count) merge files key-checked)"
 
 # -- guardrail-status.json (advisory post-generation self-test) --------
 # Validates STRUCTURE (not runtime): every agent file has a front-matter fence,
 # a name and a description, and the expected count was written.
 $selfTest = @()
 $agentFiles = Get-ChildItem -LiteralPath "$rootPath\.github\agents" -Filter '*.agent.md' -File
-# All-managed-present (not exact-count): every agent WE ship must exist. Extra
-# agent files the user authored are preserved and reported, never a failure -
-# the installer overwrites what it manages and leaves everything else alone.
+# All-managed-present (not exact-count): every agent WE ship must exist. Discovered
+# worker wrappers are installer-owned too (regenerated from the clone). Anything
+# else is a user agent: preserved and reported, never a failure.
 $managedAgentNames = @($orderedAgents | ForEach-Object { $_.filename })
+$discoveredAgentNames = @($disc.Wrappers | ForEach-Object { Split-Path $_ -Leaf })
 $presentNames = @($agentFiles | ForEach-Object { $_.Name })
 $missingManaged = @($managedAgentNames | Where-Object { $presentNames -notcontains $_ })
 foreach ($m in $missingManaged) { $selfTest += "FAIL: managed agent $m was not written" }
-$userAgents = @($presentNames | Where-Object { $managedAgentNames -notcontains $_ })
+$userAgents = @($presentNames | Where-Object { ($managedAgentNames -notcontains $_) -and ($discoveredAgentNames -notcontains $_) })
 foreach ($af in $agentFiles) {
     $txt = Get-Content -LiteralPath $af.FullName -Raw
     if ($txt -notmatch '^\s*---') { $selfTest += "FAIL: $($af.Name) missing front-matter fence" }
@@ -3502,8 +4027,9 @@ $guardrail = [ordered]@{
 }
 Write-ManagedFile "$rootPath\.github\agent-docs\guardrail-status.json" (($guardrail | ConvertTo-Json -Depth 6))
 if ($selfTest.Count -eq 0) {
+    $discoveredNote = if ($discoveredAgentNames.Count -gt 0) { ", $($discoveredAgentNames.Count) discovered worker(s)" } else { '' }
     $preserved = if ($userAgents.Count -gt 0) { " ($($userAgents.Count) user agent(s) preserved)" } else { '' }
-    Write-Host "  Self-test PASSED - all $($managedAgentNames.Count) managed agents present$preserved." -ForegroundColor Green
+    Write-Host "  Self-test PASSED - all $($managedAgentNames.Count) managed agents present$discoveredNote$preserved." -ForegroundColor Green
 } else {
     Write-Host "  Self-test findings:" -ForegroundColor Yellow
     $selfTest | ForEach-Object { Write-Host "    $_" -ForegroundColor Yellow }
@@ -3535,14 +4061,60 @@ try {
     } else {
         $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
         $headBefore = (& git rev-parse HEAD 2>$null)
-        & git add . 2>$null | Out-Null
-        $commitMsg = if ($updateMode) { "chore: update workspace scaffolding to v$productVersion" } else { "chore: initial workspace setup" }
-        & git commit -m $commitMsg 2>$null | Out-Null
-        $headAfter = (& git rev-parse HEAD 2>$null)
+        if ($updateMode) {
+            # Commit from an ISOLATED index so whatever the user had staged stays exactly as it
+            # was. Only installer-owned paths are added (and owned deletions removed) in that index.
+            $tmpIndex = Join-Path $env:TEMP ("pp_installer_index_" + [guid]::NewGuid().ToString('N'))
+            $env:GIT_INDEX_FILE = $tmpIndex
+            $tracked = @(); $stagePaths = @()
+            try {
+                & git read-tree HEAD 2>$null | Out-Null
+                if ($LASTEXITCODE -ne 0) { & git read-tree --empty 2>$null | Out-Null }
+                # Older workspaces committed the three machine-specific files before they were
+                # .gitignored; untrack exactly those (files stay on disk). Never the user's ignores.
+                $machineFiles = @('.github/agent-docs/tool-status.json', '.github/agent-docs/guardrail-status.json', '.github/installed-manifest.json')
+                $tracked = @(& git ls-files -- @($machineFiles) 2>$null | Where-Object { $_ })
+                if ($tracked.Count -gt 0) {
+                    & git rm -r --cached --quiet -- @($tracked) 2>$null | Out-Null
+                    Write-Host "  Untracked $($tracked.Count) machine-specific file(s) the installer owns (kept on disk)." -ForegroundColor DarkGray
+                }
+                $stagePaths = @($newManifestPaths | ForEach-Object { $_ -replace '\\', '/' })
+                $addFail = 0
+                foreach ($p in $stagePaths) {
+                    if (Test-Path -LiteralPath (Join-Path $rootPath $p)) { & git add -- $p 2>$null | Out-Null; if ($LASTEXITCODE -ne 0) { $addFail++ } }
+                }
+                foreach ($d in @($prunedPaths | ForEach-Object { $_ -replace '\\', '/' })) { & git rm --cached --quiet --ignore-unmatch -- $d 2>$null | Out-Null }
+                $commitMsg = "chore: update workspace scaffolding to v$productVersion"
+                $pending = @(& git diff --cached --name-only 2>$null | Where-Object { $_ })
+                if ($addFail -gt 0) { Write-Host "  Warning: $addFail installer path(s) could not be staged - review 'git status'." -ForegroundColor Yellow }
+                if ($pending.Count -gt 0) {
+                    & git commit -m $commitMsg 2>$null | Out-Null
+                    $commitExit = $LASTEXITCODE
+                    $headAfter = (& git rev-parse HEAD 2>$null)
+                    if ($commitExit -eq 0 -and $headAfter -and $headAfter -ne $headBefore) { Write-Host "  Committed: $commitMsg ($($pending.Count) installer-owned path(s); your own staged changes were left untouched)." -ForegroundColor Green }
+                    else { Write-Host "  Warning: git commit failed (exit $commitExit) - scaffolding is updated on disk but not committed." -ForegroundColor Yellow }
+                } else {
+                    Write-Host "  Nothing new to commit." -ForegroundColor DarkGray
+                }
+            } finally {
+                Remove-Item Env:GIT_INDEX_FILE -ErrorAction SilentlyContinue
+                Remove-Item -LiteralPath $tmpIndex -Force -ErrorAction SilentlyContinue
+            }
+            # Bring the user's real index in line with the new HEAD for the installer-owned
+            # paths only (so they do not show as spurious staged changes); everything else
+            # in the user's index is left exactly as it was.
+            $syncPaths = @($stagePaths + $tracked + @($prunedPaths | ForEach-Object { $_ -replace '\\', '/' })) | Select-Object -Unique
+            if ($syncPaths.Count -gt 0) { & git reset -q HEAD -- @($syncPaths) 2>$null | Out-Null }
+        } else {
+            # Fresh install: the folder is new, so everything in it is ours.
+            & git add . 2>$null | Out-Null
+            & git commit -m "chore: initial workspace setup" 2>$null | Out-Null
+            $commitExit = $LASTEXITCODE
+            $headAfter = (& git rev-parse HEAD 2>$null)
+            if ($commitExit -eq 0 -and $headAfter -and $headAfter -ne $headBefore) { Write-Host "  Committed: chore: initial workspace setup" -ForegroundColor Green }
+            else { Write-Host "  Warning: initial commit did not complete (exit $commitExit)." -ForegroundColor Yellow }
+        }
         $ErrorActionPreference = $prevEAP
-        # Compare HEAD before/after rather than trusting $LASTEXITCODE (git returns 1 for "nothing to commit").
-        if ($headAfter -and $headAfter -ne $headBefore) { Write-Host "  Committed: $commitMsg" -ForegroundColor Green }
-        else { Write-Host "  Nothing new to commit." -ForegroundColor DarkGray }
     }
 } finally {
     Pop-Location

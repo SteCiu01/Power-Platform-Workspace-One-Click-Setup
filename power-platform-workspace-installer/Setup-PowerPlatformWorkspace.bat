@@ -1,8 +1,8 @@
 @echo off
-title Power Platform Workspace Setup v0.5.0
+title Power Platform Workspace Setup v0.5.1
 echo.
 echo  ===============================================
-echo   Power Platform Workspace -- One-click Setup v0.5.0
+echo   Power Platform Workspace -- One-click Setup v0.5.1
 echo  ===============================================
 echo.
 :: -ExecutionPolicy Bypass is required because many organisations restrict

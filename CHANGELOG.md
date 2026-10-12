@@ -5,6 +5,184 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.5.1] - 2026-10-05
+
+A hardening patch driven by an independent review of v0.5.0 plus two further passes of
+our own (the second against the moved upstream skills repo): the failure paths of the
+vendor refresh, the update commit, the PAC helper and the integrity model now behave the
+way the documentation already said they did, and the agent hand-offs match what the
+agent files are actually allowed to do. No change to the agent team or the protocol
+other than one addition: **Copilot Studio becomes a first-class department**.
+
+### Added
+
+- **090 - Copilot Studio Lead** — a ninth Team Lead under the Master (also reachable from
+  the Architect) that owns Copilot Studio agents authored as MCS2 YAML projects with
+  `pac copilot` (init / clone / pull / push / publish / delete, knowledge, agent skills).
+  Publish is treated as a shared-environment action (`APPROVED:PUBLISH:<agent>@<env>`),
+  delete needs `APPROVED:DELETE:<agent>`; Production keeps `confirm push to prod`
+- **Second Microsoft vendor clone** — the installer now maintains
+  [microsoft/copilot-studio-plugin](https://github.com/microsoft/copilot-studio-plugin)
+  next to `power-platform-skills`, from one `$vendorClones` table that drives cloning,
+  force-refresh (`Update-VendorClone`), `.gitignore`, `search.exclude`,
+  `chat.agentSkillsLocations` (`copilot-studio-plugin/skills` is registered natively),
+  the knowledge catalog, keyword skill discovery and the status script. Adding a vendor
+  is one table row plus a Lead whose `primarySkills` names the plugin id
+- **Worker discovery generalised to both vendor layouts** — `Get-PluginRoots` resolves
+  plugin ids to folders for the multi-plugin layout (`<clone>/plugins/<plugin>`) and the
+  single-plugin layout (`<clone>` is the plugin). Microsoft's four Copilot Studio workers
+  (Architect, Describer, Init, Manage) are discovered from `copilot-studio-plugin/agents/`
+  and wrapped as hidden `090-sub-*` sub-agents with the same pointer-not-fork contract;
+  additions and removals upstream create / prune wrappers on the next installer run. The
+  wrapper translation table now also covers this vendor's conventions (`Skill` tool and
+  `mcs-assistant:<skill>` references -> that plugin's `skills/<skill>/SKILL.md`;
+  `pluginRoot` from `plugin-paths.json` -> the clone folder)
+- Manifest `vendorCommits` (one entry per clone) replaces `skillsCommit`; the status
+  script reports freshness and generation drift for every clone; the Workspace Maintainer
+  refreshes both. Docs that said Copilot Studio had no dedicated Microsoft skill are
+  updated (only Dataverse schema remains source-edited)
+
+### Fixed
+
+- **Vendor refresh could report success after a failed reset** — `Update-VendorClone`
+  read `$LASTEXITCODE` after a later `rev-parse`, so a failed `reset --hard` still printed
+  "already at upstream" and returned `$true`; a failed `stash` was not checked before the
+  reset either. It now resolves the upstream commit up front, checks every step's exit code
+  immediately (including both `git status` calls - an unreadable working tree skips the
+  refresh instead of resetting over it), aborts when the stash or reset fails, and returns
+  `$true` only when `HEAD` equals that upstream commit. It also follows the default branch
+  origin advertises now (`ls-remote --symref`), so an upstream rename no longer strands the
+  clone on a stale `origin/HEAD`. When a dirty clone fails to reset the message says the
+  edits are in the stash and how to get them back. Full ref names replace the `^{commit}`
+  peel syntax (whose caret cmd-based git shims swallow - the old reset-failure test was
+  passing because of that, not because the reset path ran)
+- **Update commit touched the user's index** — Step 7 ran `git add .`, which swept
+  in-progress solution edits and three machine-specific files that older versions had
+  committed before they were `.gitignore`d (`tool-status.json`, `guardrail-status.json`,
+  `installed-manifest.json`); an unqualified `git commit` also committed whatever the user
+  had staged themselves, and files pruned by the installer were deleted on disk but never
+  committed. Update mode now commits from an isolated index (`GIT_INDEX_FILE`): it untracks
+  exactly those three machine files, adds only installer-owned paths, stages the deletions
+  it made, checks the add/commit exit codes, and then re-syncs just those paths in the
+  user's real index. Whatever the user had staged stays staged and uncommitted
+- **Worker-wrapper prune matched too broadly** — any `*-sub-*.agent.md` was removed on
+  update, including a user's own agent with that substring in its name. The prune now
+  requires the three-digit Lead prefix *and* the wrapper marker in the file body
+- **Integrity model** — discovered worker wrappers were not in the manifest, so
+  `-VerifyRoot` was blind to them and the self-test counted them as "user agents"; the
+  merge files (`settings.json`, `mcp.json`, `.code-workspace`) were hashed even though they
+  legitimately hold user keys, so a user setting - or the status script registering a new
+  skill folder - showed up as drift. The manifest now has three sections: `files` and
+  `discovered` are SHA256-hashed; `merged` lists the required keys. `-VerifyRoot` checks
+  those keys by **value** (`requiredTrue`: a present-but-`false`
+  `allowInvocationsFromSubagents` is reported as `KEY DISABLED`), rejects a manifest with no
+  hashed files (`EMPTY MANIFEST`), and reads config files the way VS Code does. The
+  self-test reports "N discovered worker(s)" separately
+- **Config merge replaced files it could not parse** — a `settings.json` with comments or
+  trailing commas (normal for VS Code) failed `ConvertFrom-Json`, was backed up and
+  overwritten with only the installer keys. `Merge-JsonSettings` now reads JSONC (comments
+  outside strings, trailing commas, UTF-8 BOM) and preserves every user key (the commented
+  original is kept as `.bak`); a file that still does not parse is left untouched,
+  reported in the summary and surfaced by `-VerifyRoot` as `UNPARSEABLE`
+- **Folder rename lost the workspace file's user settings** — the `<folder>.code-workspace`
+  is named after the folder; after a rename the installer created a fresh one and pruned the
+  old one. It now uses the previously shipped file (named in the old manifest) as the base,
+  so user folders and settings carry over before the old file is pruned
+- **Legacy orphan removal by name only** — `.github/copilot/` and `.session-active` were
+  deleted whenever present. They are now removed only when their content is recognisably
+  installer output; otherwise they are reported and left
+- **Settings merge dropped nested user keys** — `Merge-SettingValue` only recursed into
+  `[hashtable]` values; the `[ordered]` skill-location map was therefore replaced, not
+  merged, on update. It now recurses into any dictionary, so user-added
+  `chat.agentSkillsLocations` entries survive
+- **`scripts/pac-workflows.ps1`** — ran pack, import and commit without checking exit codes
+  (a failed pack could import the previous package), treated `-Environment` as a label
+  only, classified Production by the word "prod" in the label or org (an environment
+  called "Treasury Live" sailed through), fell open when the post-import `pac solution list`
+  failed, accepted `SolBackup` as proof that `Sol` was imported, resolved `./` paths against
+  the caller's CWD, accepted `..` as a name, and committed with `git add .`. It now stops at
+  the first failed `pac` / `git` step, deletes any previous package before packing, anchors
+  every path to the workspace that contains it, rejects dotted or path-like names, resolves
+  the real target with `pac org who` and **requires** it to match the label's URL (from the
+  user-owned `.github/agent-docs/environments.json` map or `-EnvironmentUrl`; an unmapped
+  label is refused), classifies Production from that map (the name heuristic remains only as
+  an extra guard), verifies the import with `pac solution list --json --environment <url>`
+  by **exact** unique name and fails closed when the list cannot run, and stages / commits
+  only the solution's own folder (`git commit -- <folder>`, so the user's own staged files
+  stay staged). A fake-`pac` test suite covers each of these paths
+- **Team Leads could not reach the agents their instructions told them to use** — the Lead
+  body said "dispatch the Solution Architect / QA", but discovery overwrote the Lead's
+  `agents:` list with its workers only, so the dispatch was refused. Leads now declare
+  `001 - Solution Architect` and `002 - Integration QA & Change Controller` as children
+  and discovery **merges** workers into that list. The Architect's mid-work mode is told
+  never to dispatch a Lead back (loop guard)
+- **Worker wrappers mapped an omitted `tools:` key to read-only** — Microsoft omits the key
+  on e.g. `code-app-architect` (meaning "inherit everything" in its runtime), which left
+  the wrapper unable to run `node --version` or write a plan. An omitted key now maps to a
+  bounded `read/search/edit/execute` set with no MCP servers. The wrapper translation table
+  also covers the vocabulary Microsoft's newer workers use: `EnterPlanMode`/`ExitPlanMode`
+  (-> `NEEDS APPROVAL` with the plan attached), `TaskCreate`/`TaskUpdate`/`TodoWrite`
+  (-> inline checklist), `apply_patch` (-> `edit`), `${CLAUDE_PLUGIN_ROOT}`
+- **Keyword skill discovery crossed plugin boundaries** — a Lead's keywords (`dataverse`,
+  `deploy`, `mcp`) matched skills in other plugins and attached them to the wrong team, and
+  matching ran on a description truncated to 160 characters. Matching is now scoped to the
+  Lead's own plugins (the ALM Lead to the Pages ALM skills; executives unscoped) and uses
+  the full description
+- **Startup script invoked by relative path** — `starting-flow.md` told the Master to run
+  `-File .github/agent-docs/Get-SessionStatus.ps1`, which fails whenever the terminal's CWD
+  is not the workspace root (typical in a multi-root window). The flow now carries the
+  absolute path for this install
+- **Purge allow-list** now includes a root-level `*.code-workspace` shipped under a
+  previous folder name
+
+### Changed
+
+- **Retry rule corrected** — a dispatch is **not** retry-safe when its WORK ORDER could have
+  written anything: the child may have finished before the response was lost. Retries are
+  limited to read-only calls and read-only dispatches; anything that could have written is
+  reconciled first (`git status`/`diff` on the artifact, `pac solution list`, a fresh
+  `sync_canvas`, run history) and re-dispatched only for what is verifiably missing. The
+  dispatch-health rule now lists the three real causes of a refused dispatch (window
+  setting, name not in `agents:`, unparseable target file)
+- **Authoring-model docs** — "offline works for EVERY component / non-canvas -> offline
+  only" is replaced by a component matrix (canvas, cloud flow, desktop flow, model-driven
+  XML, generative pages, code app, mobile app, Pages site, Dataverse schema) that says
+  which path applies to each; "read every guide before acting" is replaced by task-relevant
+  selection that honours the vendor skills' own conditional reads; Phase 2 sign-in is
+  required only when the task touches an environment
+- **Catalog facts aligned with upstream** — code apps use the template's Power Apps CLI via
+  `npx --no-install pa` (resolved per `code-apps/shared/cli-binary.md`), not `pac code`;
+  code and mobile apps need **Node.js 22+** (the installer still guarantees 18+ for the flow
+  MCP and says so in `tool-status.json`); mobile validation no longer requires a deploy;
+  the MCP App widget skill's two runtime modes (bundled or user-approved CDN) are described
+  instead of "no external dependencies"; the Pages ALM skills referenced by the Architect
+  and ALM Lead are labelled as worked examples, with `working-flow-reference.md` and
+  `pac-workflows.ps1` as the generic authority
+- **Manifest records `skillsCommit`** (the vendor clone commit the agents were generated
+  from); the status script compares it with the clone's HEAD and asks for an installer
+  re-run when they diverge, so a maintenance refresh cannot silently leave the worker roster
+  and skill lists stale. `.NET` install arguments are quoted; `tool-status.json` carries a
+  `runtimeNotes.node` line
+- **Tests 85 → 122** — `VendorClone` (+5: stash-fails, reset-fails *reaching the reset*,
+  dirty-clone recovery message, status-fails, renamed default branch), new
+  `PacWorkflows.Tests.ps1` (fake `pac` on PATH: unmapped label, mapped-URL mismatch,
+  explicit URL mismatch, dotted names, map-classified Production without "prod" in the name,
+  prod-looking org, `-ConfirmProd`, failed pack, stale zip, exact-name verification,
+  list failure fails closed, wrong CWD, user-staged file untouched, pull), `Discovery` (+5:
+  Architect/QA kept in the Lead list without duplicates, omitted `tools:` default, upstream
+  vocabulary translation, wrappers hashed and verified, self-test classification),
+  `Generated` (+7: value-checked keys, empty manifest, JSONC merge, unparseable file left
+  alone, folder-rename migration, absolute status path + conditional sign-in, capability
+  matrix, `vendorCommits`, Copilot Studio documented as a department), `Discovery` (+3 for the
+  single-plugin vendor layout: 090 wiring + `mcs-assistant:` translation, skill registration
+  scoped to the 090 Lead, pruning), `Manifest` (13 agents / 9 Leads), `Version` (+1: the README
+  test count must equal the number of
+  `It` blocks; the CHANGELOG check now anchors on the *first* heading). Test suites restore
+  the `GIT_*` identity variables they set; `Run-Tests.bat` propagates the failure count as
+  its exit code
+- **Version bumped to `0.5.1`** across the installer stamp, embedded manifest, README
+  status heading, `.bat` launcher, and this changelog
+
 ## [v0.5.0] - 2026-09-14
 
 Fine-tunes the delegation model so the three-tier team (Master → Team Lead →

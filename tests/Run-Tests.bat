@@ -8,9 +8,11 @@ set "TESTS_DIR=%~dp0"
 echo Running Pester tests in "%TESTS_DIR%"
 echo.
 
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Import-Module Pester; Invoke-Pester -Path '%TESTS_DIR%' -Output Detailed"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Import-Module Pester -MinimumVersion 5.0; $r = Invoke-Pester -Path '%TESTS_DIR%' -Output Detailed -PassThru; exit $r.FailedCount"
+set "RC=%ERRORLEVEL%"
 
 echo.
+if not "%RC%"=="0" (echo %RC% test(s) FAILED.) else (echo All tests passed.)
 echo Done. Press any key to close.
 pause >nul
-endlocal
+endlocal & exit /b %RC%

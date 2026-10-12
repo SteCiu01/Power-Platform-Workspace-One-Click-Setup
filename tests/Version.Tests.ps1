@@ -39,7 +39,20 @@ Describe 'Version single source of truth' {
         (Test-Path $changelogPath) | Should -BeTrue
         $changelog = Get-Content $changelogPath -Raw
         $ver = $script:Manifest.productVersion
-        $changelog | Should -Match ([regex]::Escape("## [v$ver]")) -Because 'the newest CHANGELOG entry must document the current version'
+        $first = [regex]::Match($changelog, '(?m)^## \[(v[^\]]+)\]')
+        $first.Success | Should -BeTrue
+        $first.Groups[1].Value | Should -Be "v$ver" -Because 'the NEWEST (first) CHANGELOG entry must document the current version, not merely some entry'
+    }
+
+    It 'README test count matches the number of It blocks in the suite (no stale claims)' {
+        $readme = Get-Content (Join-Path $PSScriptRoot '..\README.md') -Raw -Encoding UTF8
+        $claimed = [regex]::Match($readme, '\*\*Working\*\*\s+\S+\s+(\d+) tests')
+        $claimed.Success | Should -BeTrue -Because 'the status table states the suite size'
+        $actual = 0
+        foreach ($f in Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*.Tests.ps1' -File) {
+            $actual += ([regex]::Matches((Get-Content -LiteralPath $f.FullName -Raw), "(?m)^\s*It\s+'")).Count
+        }
+        [int]$claimed.Groups[1].Value | Should -Be $actual
     }
 
     It '.bat launcher banner and window title match the installer version' {

@@ -23,11 +23,11 @@ command groups and flags evolve, so confirm exact syntax with `pac help`,
 
 | CLI | Required? | Runs | Owned by | Purpose |
 |-----|-----------|------|----------|---------|
-| **`pac`** (Power Platform CLI) | Yes (auto-installed) | terminal | Solution ALM & Environments Lead, Master | Auth, environment selection, solution export/unpack/pack/import, whoami |
+| **`pac`** (Power Platform CLI) | Yes (auto-installed) | terminal | Solution ALM & Environments Lead, Copilot Studio Lead, Master | Auth, environment selection, solution export/unpack/pack/import, whoami; `pac copilot` (2.9.3+) for Copilot Studio agent workspaces |
 | **`dnx`** (.NET 10 SDK) | Auto-installed (live canvas authoring) | MCP server | Canvas Apps Lead | Launches the `canvas-authoring` MCP server for real-time coauthoring |
-| **`node`** (Node.js 18+) | Auto-installed (live flow authoring) | MCP server | Power Automate Lead | Launches the `flow-agent` MCP server (authenticated with `az login`) |
+| **`node`** (Node.js 18+) | Auto-installed (live flow authoring) | MCP server | Power Automate Lead | Launches the `flow-agent` MCP server (authenticated with `az login`). Code apps and mobile apps (Expo SDK 55) need **Node.js 22+** - the installer only guarantees 18+, so those Leads check `node --version` first |
 | **`az`** (Azure CLI) | Auto-installed | terminal | Power Automate Lead, Canvas Apps Lead (repoint) | Authenticate the `flow-agent` MCP (`az login`); resolve a Power Apps visual's live `appId` from Dataverse during repoint |
-| **`git`** | Yes | terminal | Master, Workspace Maintainer | Clone skills, version the workspace, conventional commits |
+| **`git`** | Yes | terminal | Master, Workspace Maintainer | Clone / refresh the two Microsoft vendor repos, version the workspace, conventional commits |
 
 Runtime availability is recorded during setup in
 `.github/agent-docs/tool-status.json`; each tool entry carries a `found` flag and,
@@ -56,19 +56,20 @@ pac org select --environment <id>  # point at an environment
 ### Solutions (the ALM core)
 
 ```powershell
-# Export a solution as a zip (unmanaged for dev, managed for prod)
-pac solution export --name <SolutionName> --path exports\ --managed false
+# Export a solution as a zip (unmanaged for dev, managed for prod); pin the target
+pac solution export --name <SolutionName> --path exports\<SolutionName>.zip --environment <url>
 
 # Unpack a zip into source-controllable files
-pac solution unpack --zipfile exports\<SolutionName>.zip --folder <Env>\<SolutionName> --packagetype Both
+pac solution unpack --zipfile exports\<SolutionName>.zip --folder <Env>\<SolutionName>
 
-# Pack source back into a zip
-pac solution pack --zipfile deploy\<SolutionName>.zip --folder <Env>\<SolutionName> --packagetype Both
+# Pack source back into a zip (Unmanaged for dev work, Managed for production)
+pac solution pack --zipfile deploy\<SolutionName>.zip --folder <Env>\<SolutionName> --packagetype Unmanaged
 
-# Import a packed solution into the active environment
-pac solution import --path deploy\<SolutionName>.zip --publish-changes
+# Import a packed solution into the VERIFIED environment (never "whatever is active")
+pac solution import --path deploy\<SolutionName>.zip --environment <url>
 
-pac solution list                  # solutions in the active environment
+# Verify by exact unique name after an import
+pac solution list --environment <url> --json
 ```
 
 > **Production guardrail:** the agents never run an import against a Production
@@ -78,7 +79,50 @@ pac solution list                  # solutions in the active environment
 
 `scripts/pac-workflows.ps1` exposes `pull`, `push`, and `init` verbs that chain
 the commands above with the correct folders and conventional-commit messages, so
-the Team Leads and the Master call one command instead of four.
+the Team Leads and the Master call one command instead of four. Its contract:
+
+- `-Environment <label>` is the local folder name (`DEV`, `TEST`, `PROD`, ...).
+  For `pull` / `push` the label must resolve to a URL - either through the
+  user-owned map `.github/agent-docs/environments.json`
+  (`{ "DEV": { "url": "https://...", "production": false } }`) or an explicit
+  `-EnvironmentUrl`. An unmapped label is refused (exit 5); it never falls back to
+  the active `pac` profile.
+- The active org from `pac org who` must equal that URL (exit 4 otherwise), and
+  it is pinned on every remote command with `--environment`.
+- Production is classified from the map's `production: true` (the word "prod" in
+  a label/URL is only an extra guard). A Production push needs `-ConfirmProd`
+  (exit 2 without it).
+- Every `pac` / `git` step is exit-code checked; the previous package is deleted
+  before packing; after import the solution must appear by exact unique name in
+  `pac solution list --json` (exit 6 if absent, exit 7 if the list cannot run -
+  it fails closed).
+- Paths are anchored to the workspace that contains the script (the caller's
+  CWD is irrelevant); names with dots or path characters are rejected.
+- Only the solution folder is staged and committed (`git commit -- <folder>`);
+  whatever you had staged yourself stays staged.
+
+### Copilot Studio agents (`pac copilot`, owned by the 090 Copilot Studio Lead)
+
+Copilot Studio agents are not edited through solution XML in this workspace: they
+are **MCS2 YAML projects** synchronised with `pac copilot`, exactly as Microsoft's
+[copilot-studio-plugin](https://github.com/microsoft/copilot-studio-plugin) skills
+prescribe (the Lead follows those `SKILL.md` files step by step and dispatches
+Microsoft's Architect / Describer / Init / Manage workers). Requires `pac` **2.9.3+**.
+
+```powershell
+pac copilot init --name '<display>' --environment '<id-or-url>' --project-dir '<dir>' --publisher-prefix '<prefix>' --authoring-mode cli-copilot --instructions '<text>'
+pac copilot clone --environment '<id-or-url>' ...   # bring an existing cloud agent into a local workspace
+pac copilot pull --project-dir '<dir>'              # always before editing / before push
+pac copilot push --project-dir '<dir>'              # upload local YAML (pull-before-push)
+pac copilot publish ...                             # make the draft live - APPROVED:PUBLISH:<agent>@<env>
+pac copilot delete ...                              # APPROVED:DELETE:<agent>
+pac copilot list --environment '<id-or-url>'
+```
+
+Workspace layout the Lead expects: `settings.mcs.yml`, `agent.sync.yaml`, `behaviors/`,
+`capabilities/{knowledge,tools}/`, `infrastructure/connections/`, `.mcs/` (CLI-managed,
+never hand-edited). The environment is always an explicit ID or Dataverse URL - never
+the active profile's default.
 
 ---
 

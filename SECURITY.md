@@ -4,7 +4,8 @@
 
 | Version | Supported |
 |---|---|
-| v0.1.1-pre-release | :white_check_mark: |
+| v0.5.x (latest release) | :white_check_mark: |
+| older pre-releases (v0.1 - v0.4) | :x: - please update |
 
 ## Reporting a Vulnerability
 
