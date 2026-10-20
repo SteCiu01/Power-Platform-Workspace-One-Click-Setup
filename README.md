@@ -52,7 +52,7 @@ Contributions and feedback welcome.
 - [3.6 Agentic design principles](#36-agentic-design-principles)
 - [3.7 How it works under the hood](#37-how-it-works-under-the-hood)
 - [3.8 Quality & validation](#38-quality--validation)
-- [3.9 Current status (v0.5.1)](#39-current-status-v051)
+- [3.9 Current status (v0.5.2)](#39-current-status-v052)
 - [3.10 Disclaimer](#310-disclaimer)
 - [Contributing](#contributing) · [Files in this repository](#files-in-this-repository) · [License](#license)
 
@@ -90,6 +90,8 @@ The installer **stops** only if Git or VS Code is missing. Everything else it **
 
 **On your system** — exactly the 🤖 rows above, nothing else. Git, VS Code and Copilot are yours to install.
 
+**Outside the folder** — only if you answer **Y** in Step 5: **two keys in your VS Code user `settings.json`** (`%APPDATA%\Code\User\settings.json`), edited in place — the nested-dispatch flag and the workspace-relative skill folders. Everything else in that file is left as it is.
+
 **Never touched** — your `<Env>/<Solution>/` folders, exports, personal files, unrelated Git work, live environments.
 
 ## 1.3 Get the two files
@@ -113,7 +115,7 @@ Each step prints a banner `STEP n of 8 - <title>`; the interactive ones end with
 | **2 — Checking Prerequisites** | green checks / yellow warnings | nothing (Enter at the end) | Git, VS Code ≥ 1.117 (stop if missing), git identity, `pac` (auto-install), Copilot (inform), Power Platform Tools (auto), .NET 10 SDK (auto), Azure CLI (auto), Node.js (auto). Warnings are collected and printed once. |
 | **3 — Creating Folder Structure** | created paths | Enter | `exports/`, `deploy/`, `scripts/`, `.github/agents`, `.github/agent-docs`, `.github/skills/...`, `.vscode`. |
 | **4 — Microsoft Vendor Repositories** | clone / refresh lines per repo | nothing | Clones `power-platform-skills` and `copilot-studio-plugin`; existing clones are **force-refreshed** (local edits auto-stashed, stash name printed). Success is claimed only when `HEAD` equals the upstream commit. |
-| **5 — Generating Configuration Files** | one line per file | Enter at the end | `.gitignore`, `pac-workflows.ps1`, `copilot-instructions.md`, `AGENTS.md`, the 13 agents, **worker discovery** (hidden `0NN-sub-*` wrappers from both clones), status script, flow docs, the custom skill, `tasks.json`, `settings.json` + `mcp.json` (merged — your keys survive, JSONC comments preserved as a `.bak`), `<folder>.code-workspace`. |
+| **5 — Generating Configuration Files** | one line per file, then **one prompt** | `Enable the agent team in your VS Code user settings now? (Y/n)` → **Y** (default) | `.gitignore`, `pac-workflows.ps1`, `copilot-instructions.md`, `AGENTS.md`, the 13 agents, **worker discovery** (hidden `0NN-sub-*` wrappers from both clones), status script, flow docs, the custom skill, `tasks.json`, `settings.json` + `mcp.json` (merged — your keys survive, JSONC comments preserved as a `.bak`), `<folder>.code-workspace`. **The prompt** edits your VS Code user `settings.json` in place (two keys, see [1.5](#15-your-first-session)); answer **n** and the installer instead offers to patch any saved `.code-workspace` of yours that opens this folder. |
 | **6 — Workspace Guidance and Integrity** | manifest + self-test lines | nothing | `tool-status.json`, SHA-256 `installed-manifest.json` (+ `vendorCommits`), self-prune of files older versions shipped, self-test → `guardrail-status.json`. |
 | **7 — Initializing Git Repository** | commit summary | nothing | `git init` if needed; initial commit, or an **isolated-index** update commit of installer-owned paths only. Skipped with a warning if git identity is unset. |
 | **8 — Launching VS Code** | `Press Enter to open VS Code and finish setup...` | Enter | Opens the `<folder>.code-workspace` (keeps Lead → worker dispatch on even in a multi-root window). |
@@ -126,20 +128,26 @@ Each step prints a banner `STEP n of 8 - <title>`; the interactive ones end with
 4. Say what you need (or just "hi").
 
 > [!IMPORTANT]
-> **How you open the folder matters.** `chat.subagents.allowInvocationsFromSubagents` (lets Team Leads dispatch their workers) is *window-scoped*: in a window opened from a `.code-workspace` file, VS Code ignores the folder's `.vscode/settings.json` for it.
+> **How you open the folder.** If you answered **Y** to the Step 5 user-settings prompt, open it **any way you like** — *File > Open Folder*, *Add Folder to Workspace* in a blank or existing window, the shipped `<folder>.code-workspace`, or any `.code-workspace` you saved yourself — and the full team and all skills are there from the first message.
+>
+> If you answered **n**, the two settings the agents depend on (`chat.subagents.allowInvocationsFromSubagents`, `chat.agentSkillsLocations`) are *window-scoped* and live only in the folder's `.vscode/settings.json` and the shipped workspace file, which VS Code ignores in any window backed by another workspace file:
 >
 > | You open the folder via… | Result |
 > |---|---|
 > | The shipped `<folder>.code-workspace` (what the installer opens) | ✅ full Master → Lead → Worker dispatch |
 > | **File > Open Folder** | ✅ `.vscode/settings.json` applies |
-> | **Your own** multi-root `.code-workspace` | ❌ unless you copy the setting into its `"settings"` block — Leads silently cannot dispatch |
+> | *Add Folder to Workspace* (untitled) or **your own** saved `.code-workspace` without the settings | ❌ Leads silently cannot dispatch; vendor skills not listed natively |
+>
+> Fix: re-run the installer and answer **Y**, or add `"chat.subagents.allowInvocationsFromSubagents": true` to that workspace file's `settings` block, then *Developer: Reload Window*. The Master's status block says which scope is in effect and names any saved file that lacks it.
+
+**What the user-level setting does and does not enable.** `chat.subagents.allowInvocationsFromSubagents: true` in your user settings is in effect in **every** VS Code window. It changes nothing for blank windows, built-in Copilot chat, or custom agents that never delegate; in another agentic workspace whose agents are designed to delegate (e.g. the Fabric twin, which writes the same key) nested dispatch works there too — opt out per workspace with `false` in its `.code-workspace`. The skill locations are written workspace-relative, so they resolve only in windows that contain this workspace. It never installs agents elsewhere, grants tools, or bypasses approval tokens.
 
 On your first message the Master runs **one** status script and shows **one** block:
 
 | Line | Meaning |
 |---|---|
 | Skills | Commit date of each vendor clone, how far behind upstream, whether a clone **moved since the agents were generated** (→ "re-run the installer"), custom skill date. Maintenance is hinted, never forced. |
-| Config | Skill folders registered in `chat.agentSkillsLocations` (new upstream folders self-register) and whether nested dispatch is on. |
+| Config | Skill folders registered in `chat.agentSkillsLocations` (new upstream folders self-register), how many the user settings contribute, and **which nested-dispatch scope is in effect** (`enabled at user level` / `enabled in .vscode/settings.json only` / `NOT set`) — plus a warning naming any saved `.code-workspace` that opens this folder without the flag. |
 | Identity / Env | Active `pac auth` profile and environment (`az` as fallback). Sign-in is requested **only if the task needs an environment** — local edits, reviews and planning never block on it. |
 | Tools | Live re-check of git / pac / dnx / node / az; refreshes `tool-status.json`. |
 
@@ -157,7 +165,7 @@ Then it routes your request. You never switch agent for normal work; the only op
 |---|---|---|
 | 1 | Vendor clones are force-refreshed to upstream | **Don't edit** `power-platform-skills/` or `copilot-studio-plugin/`; edits are stashed (`git -C <repo> stash list`), not kept. |
 | 2 | Installer-managed files are overwritten | **Don't hand-edit** `.github/agents/*`, `.github/skills/*`, `copilot-instructions.md`, `AGENTS.md`, `scripts/pac-workflows.ps1`, the flow docs. Add **new** files under `.github/` instead — they are never touched. |
-| 3 | Config files are merged, not replaced | `settings.json`, `mcp.json`, `<folder>.code-workspace`: your keys survive; only the installer-required keys are re-asserted. A file that cannot be parsed is left alone and reported. A renamed folder carries the old workspace file's settings over. |
+| 3 | Config files are merged, not replaced | `settings.json`, `mcp.json`, `<folder>.code-workspace`: your keys survive; only the installer-required keys are re-asserted. A file that cannot be parsed is left alone and reported. A renamed folder carries the old workspace file's settings over. Your VS Code **user** `settings.json` is edited in place (two keys) and only with your **Y**. |
 | 4 | Obsolete installer files are purged | Strict `old − new` diff over `installed-manifest.json`, never a folder sweep; the deletions are committed. |
 | 5 | Your work is never touched | Solutions, exports, personal files, your staged Git changes. |
 
@@ -165,7 +173,11 @@ Then it routes your request. You never switch agent for normal work; the only op
 
 ## 1.7 Troubleshooting
 
-**Team Leads return nothing / the Master says workers can't be dispatched.** You opened VS Code from your own `.code-workspace` without the setting. Add `"chat.subagents.allowInvocationsFromSubagents": true` to its `"settings"` block, then **Developer: Reload Window**. The status block names the cause.
+**Team Leads return nothing / the Master says workers can't be dispatched.** The window you are in does not have `chat.subagents.allowInvocationsFromSubagents: true` in effect. It is *window-scoped*: in a window backed by a workspace file (saved, or untitled after *Add Folder to Workspace*) VS Code ignores the folder's `.vscode/settings.json`. The Master's status block tells you the scope in effect (`enabled at user level` / `enabled in .vscode/settings.json only` / `NOT set`) and names the file. Fix, best first: re-run the installer and answer **Y** to the Step 5 user-settings prompt (covers every window); or add the line to that workspace file's `"settings"` block (the Master can do it after `APPROVED:EDIT:<file>`); or open the folder with *File > Open Folder*. Then **Developer: Reload Window**.
+
+**Vendor skills not in the native skill list in my own workspace file.** Same cause — `chat.agentSkillsLocations` is window-scoped too. The user-level option writes workspace-relative entries that resolve in any window containing this folder. Agents still find the skills by path in the meantime.
+
+**I want nested delegation off in another workspace.** Add `"chat.subagents.allowInvocationsFromSubagents": false` to that workspace's `.code-workspace` `settings` block; workspace scope overrides user scope.
 
 **Agent dropdown is stale after an update.** **Developer: Reload Window**.
 
@@ -324,6 +336,8 @@ Power Platform/
 
 ## 2.8 FAQ
 
+**What exactly does the Step 5 user-settings option change on my machine?** Two keys in `%APPDATA%\Code\User\settings.json`, edited in place: `chat.subagents.allowInvocationsFromSubagents: true` (every VS Code window — relevant only to *custom* agents that delegate; opt out per workspace with `false` in its `.code-workspace`) and workspace-relative `chat.agentSkillsLocations` entries (resolve only in windows that contain this workspace). Nothing else. Details in [1.5](#15-your-first-session).
+
 **Can I move the workspace folder?** Yes. Re-run the installer there once so the `.code-workspace` and the absolute status-script path follow it (settings carry over).
 
 **macOS / Linux?** The installer is Windows-only; the workspace works on any OS once created.
@@ -425,7 +439,7 @@ Every skill folder is registered in `chat.agentSkillsLocations`, so agents see t
 ## 3.8 Quality & validation
 
 - **JSON Schema** (`schema/agent-manifest.schema.json`) — shape of every manifest entry; validated in CI.
-- **Pester suite** (`tests/`) — manifest integrity (13 agents, 4 / 9 tiers, unique ids), hierarchy, least-privilege tools, version / doc consistency (incl. the README test count), generated-file **content**, config merge robustness (JSONC, unparseable left alone, folder-rename migration), `-VerifyRoot` value checks, worker discovery for **both vendor layouts** (wiring, translation, pruning, collisions), vendor refresh failure doubles (`git.cmd` shim), and the emitted `pac-workflows.ps1` driven end-to-end with a fake `pac` (unmapped label, URL mismatch, map-classified Production, stale zip, exact-name verification, fail-closed list, scoped commit).
+- **Pester suite** (`tests/`) — manifest integrity (13 agents, 4 / 9 tiers, unique ids), hierarchy, least-privilege tools, version / doc consistency (incl. the README test count), generated-file **content**, config merge robustness (JSONC, unparseable left alone, folder-rename migration), `-VerifyRoot` value checks, worker discovery for **both vendor layouts** (wiring, translation, pruning, collisions), vendor refresh failure doubles (`git.cmd` shim), the emitted `pac-workflows.ps1` driven end-to-end with a fake `pac` (unmapped label, URL mismatch, map-classified Production, stale zip, exact-name verification, fail-closed list, scoped commit), the in-place **user-settings edit** (comments / order / line endings / BOM preserved, idempotent, broken file refused) and saved-workspace patching, and the emitted **status script** run offline from an unrelated CWD asserting the nested-dispatch scope it reports.
 - **CI** (`.github/workflows/validate.yml`) — PowerShell 7 on every push / PR.
 - **Install-time self-test + integrity manifest** — `guardrail-status.json`, SHA-256 `installed-manifest.json`.
 
@@ -436,10 +450,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "Import-Module Pester; In
 
 Not covered: a full end-to-end install against a live tenant, and the *behavioural* quality of prompts — validated by real-world use (v0.5.0: live canvas add-control via Master → Lead → worker, a cross-type Architect PLAN, a plain-words delete correctly stopped at `NEEDS APPROVAL`).
 
-## 3.9 Current status (v0.5.1)
+## 3.9 Current status (v0.5.2)
 
 | Area | Status |
 |---|---|
+| Works however the folder is opened | **New in v0.5.2** — opt-in user-level enablement (nested-dispatch flag + workspace-relative skill locations, edited in place); status script reports the scope in effect and names saved workspace files that lack the flag; saved-file patching as fallback |
 | One-click setup (.bat + .ps1) | **Working** — Windows 10/11 |
 | 13-agent hierarchy (Master → Architect / 9 Leads) | **Working** — generated from an embedded, schema-validated manifest |
 | Copilot Studio department (090) + second vendor clone | **New in v0.5.1** — `pac copilot` skills registered natively, Microsoft's four workers auto-discovered, publish / delete gated |
@@ -452,7 +467,7 @@ Not covered: a full end-to-end install against a live tenant, and the *behaviour
 | Vendor clone refresh | **Hardened in v0.5.1** — two clones from one table; `HEAD` = upstream or explicit failure; renamed default branch followed |
 | Update commit + integrity model | **Fixed in v0.5.1** — isolated-index commit, value-checked config, JSONC merge, rename migration |
 | Agent hand-offs | **Fixed in v0.5.1** — Leads can really reach Architect / QA; upstream worker vocabulary translated; reconcile-before-retry |
-| Manifest + generator integrity (`-EmitAgentsTo` / `-VerifyRoot`, Pester + CI) | **Working** — 122 tests |
+| Manifest + generator integrity (`-EmitAgentsTo` / `-VerifyRoot`, Pester + CI) | **Working** — 144 tests |
 
 Pre-release: genuinely useful today, expect rough edges. [Open an issue](https://github.com/SteCiu01/Power-Platform-Workspace-One-Click-Setup/issues).
 

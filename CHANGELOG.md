@@ -5,6 +5,107 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.5.2] - 2026-10-16
+
+One change, ported from the Fabric twin's v0.7.2 after the same field failure was
+reproduced here: the agent team must work **however you open the workspace folder** —
+File > Open Folder, *Add Folder to Workspace* in a blank window, or any `.code-workspace`
+you saved yourself — and a re-run of the installer must reach every one of those windows.
+
+### Why
+
+The two VS Code settings the team depends on are **window-scoped**:
+
+- `chat.subagents.allowInvocationsFromSubagents` — without it a Team Lead (itself running
+  as a sub-agent) cannot dispatch its Microsoft workers; the Master silently ends up doing
+  the work alone, or the Lead returns empty.
+- `chat.agentSkillsLocations` — registers the Microsoft skill folders so agents see them
+  natively.
+
+VS Code applies window-scoped settings from the folder's `.vscode/settings.json` **only**
+in a window opened with *File > Open Folder*. Any window backed by a workspace file — a
+saved `.code-workspace`, **or the untitled one VS Code creates the moment you *Add Folder
+to Workspace*** — ignores the folder's `settings.json` for them. v0.5.0 shipped a
+`<folder>.code-workspace` with the flag and opened VS Code from it; that covers only the
+window the installer opens. Field case: adding the workspace to an existing multi-root
+window, asking the Master for work, and watching the Lead fail to dispatch.
+
+### Added
+
+- **Step 5 — "Enable the agent team in your VS Code user settings now? (Y/n)"** (default
+  Yes, never silent). On Yes the installer edits `%APPDATA%\Code\User\settings.json`
+  **in place** — your other settings, comments, key order, indentation, line endings and
+  BOM are preserved; only two things change:
+  1. `"chat.subagents.allowInvocationsFromSubagents": true` is added, or an explicit
+     `false` is flipped.
+  2. The current **workspace-relative** skill folders (`.github/skills`,
+     `power-platform-skills/plugins/<plugin>/skills`, `copilot-studio-plugin/skills`) are
+     merged into `chat.agentSkillsLocations`; your own entries are kept; a re-run adds only
+     folders that appeared upstream since. Absolute and `~/` paths are never written at
+     user level.
+  The edit is validated before writing (a file that would not parse is never touched) and
+  idempotent (a second run reports "already up to date"). If VS Code Profiles are in use,
+  the profile settings files are listed so you can repeat the two lines there.
+- **Fallback when declined** — the installer scans VS Code's `workspaceStorage` for saved
+  `.code-workspace` files that open this folder, lists exactly what each lacks and offers
+  (`Y/n`) to add only the missing entries. Untitled *Add Folder* workspaces cannot be
+  patched that way, which is why the user-level option is the default.
+- **Status script** now reports which scope is in effect — `Nested dispatch: enabled at
+  user level (every VS Code window)` / `enabled in .vscode/settings.json only (… NOT
+  windows opened from another .code-workspace file or via Add Folder to Workspace)` /
+  `NOT set` — how many workspace-relative skill folders the user settings contribute, and
+  names any saved workspace file that lacks the flag (with the `(Workspace)` title-bar
+  tell and the three fixes). With the user-level setting present it says those files
+  need no patch. `PP_WORKSPACE_USER_SETTINGS` / `PP_WORKSPACE_STORAGE` override the paths
+  for tests. It now reads `settings.json` as JSONC too.
+- **Master / Lead dispatch-health rule** — names "a Lead comes back empty twice" as the
+  symptom, tells the agent to quote the CONFIG scope line and the saved-file warning
+  instead of guessing (never claim `settings.json` lacks the setting without reading
+  it), treats `Requested agent '<name>' not found` as retry-safe (≤3, exact name, never
+  substitute), re-dispatches a child that returned without a WORK RESULT **once** with a
+  resume context, and may offer to add the single line to the workspace file you are in
+  after `APPROVED:EDIT:<file>` (then *Developer: Reload Window*). The reconcile-before-
+  retry rule for write-capable dispatches is unchanged and now also names
+  `pac copilot push`.
+- Generated `copilot-instructions.md` / `AGENTS.md`, the Workspace Maintainer's contract,
+  the starting flow and the README describe the scoping model and exactly what the
+  user-level setting does and does not enable.
+
+### What the user-level setting does and does not enable — read this
+
+Because it lives in your **user** settings, `chat.subagents.allowInvocationsFromSubagents:
+true` is in effect in **every VS Code window on this machine**, not only when this
+workspace is open. VS Code offers no per-folder conditional for a window-scoped setting,
+so this is the only scope that satisfies "works however I open it".
+
+| Situation | Effect |
+|---|---|
+| Blank VS Code window, no folder | None — no workspace agents exist; default Copilot chat is unchanged. |
+| Any project where you use **built-in Copilot chat / agent mode** only | None — the flag concerns *custom* agents (`.agent.md`) running as sub-agents. |
+| A project with custom agents that **never delegate** | None. |
+| **Another agentic workspace** (e.g. the Fabric twin) whose custom agents are **designed to delegate** | **Enabled** — exactly what that workspace expects (the Fabric installer writes the same key). Opt out per workspace with `"chat.subagents.allowInvocationsFromSubagents": false` in its `.code-workspace`; workspace scope overrides user scope. |
+| This workspace, opened **any** way | **Enabled** — Master → Team Lead → Worker from the first second. |
+
+It never installs agents or skills anywhere else, never changes what built-in Copilot can
+do, never grants an agent new tools, and never bypasses the approval tokens. The skill
+locations written at user level are workspace-relative, so they resolve **only** in
+windows that contain a folder with those sub-paths — in practice, this workspace.
+
+### Tests
+
+- New `UpdateSafety.Tests.ps1` — helpers AST-extracted from the installer: JSONC parsing;
+  in-place user-settings edit (append flag + relative block preserving comments / order /
+  CRLF; flip `false → true` and merge only missing locations keeping user entries with LF
+  preserved; idempotent; absolute / `~` never written; file created when absent; BOM
+  preserved; broken file refused and left untouched); saved-workspace detection, merge-
+  only patch and idempotency; static wiring of the prompt and the fallback.
+- New `SessionStatus.Tests.ps1` — runs the emitted status script from an unrelated CWD
+  with pinned user-settings / storage paths: root resolved from its own location, every
+  section printed, both vendor clones reported, the three scope strings, the exact saved-
+  file warning (and its absence when none opens the root or the user-level flag is set),
+  the workspace-relative count excluding entries that do not resolve.
+- Tests 122 → 144.
+
 ## [v0.5.1] - 2026-10-05
 
 A hardening patch driven by an independent review of v0.5.0 plus two further passes of
